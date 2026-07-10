@@ -8,6 +8,7 @@ import {
   type ReactNode,
 } from 'react';
 import {
+  BrowserAuthError,
   InteractionRequiredAuthError,
   PublicClientApplication,
   type AccountInfo,
@@ -35,6 +36,21 @@ export const AuthContext = createContext<AuthContextValue | null>(null);
 
 const pca = new PublicClientApplication(msalConfig);
 
+// Popup sign-in breaks when the browser blocks the window or the popup never
+// hands its hash back (common on mobile). These codes mean "retry as a
+// full-page redirect", not "the user's sign-in failed".
+const popupUnusableCodes = new Set([
+  'popup_window_error',
+  'empty_window_error',
+  'monitor_window_timeout',
+  'hash_empty_error',
+  'hash_does_not_contain_known_properties',
+]);
+
+function isPopupUnusableError(e: unknown): boolean {
+  return e instanceof BrowserAuthError && popupUnusableCodes.has(e.errorCode);
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<AuthStatus>('initializing');
   const [account, setAccount] = useState<AccountInfo | null>(null);
@@ -51,8 +67,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     void (async () => {
       try {
         await pca.initialize();
-        await pca.handleRedirectPromise();
-        const existing = pca.getAllAccounts()[0] ?? null;
+        const redirectResult = await pca.handleRedirectPromise();
+        const existing = redirectResult?.account ?? pca.getAllAccounts()[0] ?? null;
         if (existing) pca.setActiveAccount(existing);
         if (!disposed) {
           setAccount(existing);
@@ -93,6 +109,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setAccount(result.account);
       setStatus('authenticated');
     } catch (e) {
+      if (isPopupUnusableError(e)) {
+        try {
+          await pca.loginRedirect({ scopes: loginScopes, prompt: 'select_account' });
+          return;
+        } catch (redirectError) {
+          setError(messageOf(redirectError));
+          return;
+        }
+      }
       setError(messageOf(e));
     }
   }, []);
