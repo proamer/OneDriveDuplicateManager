@@ -85,7 +85,65 @@ export function createOneDriveService(client: GraphClient) {
     async deleteDriveItem(itemId: string): Promise<void> {
       await client.request(`/me/drive/items/${itemId}`, { method: 'DELETE' });
     },
+
+    /**
+     * Deletes up to GRAPH_BATCH_LIMIT items in one Graph $batch request instead
+     * of one round-trip per file. Returns a per-item outcome so the caller can
+     * retry throttled items and record failures. A 404 counts as success (the
+     * item is already gone).
+     */
+    async deleteDriveItemsBatch(itemIds: string[]): Promise<BatchDeleteResult[]> {
+      if (itemIds.length === 0) return [];
+      const requests = itemIds.map((id, index) => ({
+        id: String(index),
+        method: 'DELETE',
+        url: `/me/drive/items/${id}`,
+      }));
+      const response = await client.json<{
+        responses?: Array<{ id: string; status: number; headers?: Record<string, string>; body?: unknown }>;
+      }>('/$batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requests }),
+      });
+
+      // Graph does not guarantee response order — match on the request id.
+      const byId = new Map((response.responses ?? []).map((entry) => [entry.id, entry]));
+      return itemIds.map((itemId, index) => {
+        const entry = byId.get(String(index));
+        const status = entry?.status ?? 0;
+        const ok = (status >= 200 && status < 300) || status === 404;
+        const headers = entry?.headers ?? {};
+        const retryRaw = headers['Retry-After'] ?? headers['retry-after'];
+        const retryAfter = retryRaw ? Number(retryRaw) : undefined;
+        let error: string | undefined;
+        if (!ok) {
+          const body = entry?.body as { error?: { code?: string; message?: string } } | undefined;
+          error = body?.error?.message ?? body?.error?.code ?? `HTTP ${status || 'no response'}`;
+        }
+        return {
+          itemId,
+          status,
+          ok,
+          retryAfter: retryAfter !== undefined && Number.isFinite(retryAfter) ? retryAfter : undefined,
+          error,
+        };
+      });
+    },
   };
+}
+
+/** Microsoft Graph caps a single $batch at 20 sub-requests. */
+export const GRAPH_BATCH_LIMIT = 20;
+
+export interface BatchDeleteResult {
+  itemId: string;
+  status: number;
+  /** 2xx or 404 — the item is gone. */
+  ok: boolean;
+  /** Seconds to wait before retrying, when throttled. */
+  retryAfter?: number;
+  error?: string;
 }
 
 export type OneDriveService = ReturnType<typeof createOneDriveService>;

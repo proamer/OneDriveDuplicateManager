@@ -4,8 +4,11 @@ import { deleteJobRepository } from '../../services/db/deleteJobRepository';
 import { duplicateRepository } from '../../services/db/duplicateRepository';
 import { fileRepository } from '../../services/db/fileRepository';
 import { STORE, dbBulkPut } from '../../services/db/indexedDb';
-import { GraphError } from '../../services/graph/graphClient';
-import type { OneDriveService } from '../../services/graph/oneDriveService';
+import {
+  GRAPH_BATCH_LIMIT,
+  type BatchDeleteResult,
+  type OneDriveService,
+} from '../../services/graph/oneDriveService';
 import { messageOf } from '../../utils/errorMessage';
 
 /**
@@ -72,10 +75,14 @@ export interface ExecuteCallbacks {
   onJobUpdate(job: DeleteJob): void;
 }
 
+/** Requeue a throttled item at most this many times before giving up on it. */
+const MAX_THROTTLE_RETRIES = 8;
+
 /**
- * Deletes jobs sequentially via Microsoft Graph (soft delete → OneDrive recycle bin).
- * Safety guards re-checked per job right before the API call:
- * never the keep file, never the last remaining file of a group.
+ * Deletes jobs via Microsoft Graph $batch (soft delete → OneDrive recycle bin),
+ * up to GRAPH_BATCH_LIMIT files per request instead of one round-trip each.
+ * Throttled items are requeued (respecting Retry-After); the keep file of a group
+ * is never deleted. Group bookkeeping is done once at the end in bulk.
  */
 export async function executeDeleteJobs(
   graph: OneDriveService,
@@ -83,42 +90,110 @@ export async function executeDeleteJobs(
   signal: AbortSignal,
   callbacks: ExecuteCallbacks,
 ): Promise<void> {
-  for (const job of jobs) {
-    if (signal.aborted) return;
+  const groups = new Map((await duplicateRepository.getAllGroups()).map((group) => [group.id, group]));
+  let queue = jobs.filter((job) => job.status === 'pending' || job.status === 'deleting');
+  const deletedFileIds: string[] = [];
+  const attempts = new Map<string, number>();
 
-    const group = await duplicateRepository.getGroup(job.groupId);
-    if (group && group.keepFileId === job.fileId) {
-      await failJob(job, 'Refused: this is the file selected to keep.', callbacks);
-      continue;
-    }
-    if (group) {
-      const remaining = await duplicateRepository.getItems(group.id);
-      if (remaining.length <= 1) {
-        await failJob(job, 'Refused: at least one file must remain in the group.', callbacks);
+  while (queue.length > 0 && !signal.aborted) {
+    const chunk = queue.slice(0, GRAPH_BATCH_LIMIT);
+    queue = queue.slice(GRAPH_BATCH_LIMIT);
+
+    // Guard: never delete the file chosen to keep in a group.
+    const safe: DeleteJob[] = [];
+    for (const job of chunk) {
+      const group = groups.get(job.groupId);
+      if (group && group.keepFileId === job.fileId) {
+        await failJob(job, 'Refused: this is the file selected to keep.', callbacks);
         continue;
       }
+      safe.push(job);
+    }
+    if (safe.length === 0) continue;
+
+    const deletingJobs = safe.map((job) => ({ ...job, status: 'deleting' as const, error: null }));
+    await dbBulkPut(STORE.deleteJobs, deletingJobs);
+    for (const job of deletingJobs) callbacks.onJobUpdate(job);
+
+    let results: BatchDeleteResult[];
+    try {
+      results = await graph.deleteDriveItemsBatch(safe.map((job) => job.itemId));
+    } catch (e) {
+      if (signal.aborted) return;
+      for (const job of safe) await failJob(job, messageOf(e), callbacks);
+      continue;
+    }
+    const byItem = new Map(results.map((result) => [result.itemId, result]));
+
+    const now = new Date().toISOString();
+    const doneJobs: DeleteJob[] = [];
+    const failedJobs: DeleteJob[] = [];
+    const retryJobs: DeleteJob[] = [];
+    let waitSeconds = 0;
+
+    for (const job of safe) {
+      const result = byItem.get(job.itemId);
+      const throttled =
+        !result || result.status === 429 || result.status === 503 || result.status === 504 || result.status === 0;
+
+      if (result?.ok) {
+        doneJobs.push({ ...job, status: 'deleted', error: null, finishedAt: now });
+        deletedFileIds.push(job.fileId);
+      } else if (throttled) {
+        const tries = (attempts.get(job.id) ?? 0) + 1;
+        attempts.set(job.id, tries);
+        if (tries >= MAX_THROTTLE_RETRIES) {
+          failedJobs.push({
+            ...job,
+            status: 'failed',
+            error: 'Throttled repeatedly by OneDrive — try again later.',
+            finishedAt: now,
+          });
+        } else {
+          waitSeconds = Math.max(waitSeconds, result?.retryAfter ?? 5);
+          retryJobs.push({ ...job, status: 'pending', error: null });
+        }
+      } else {
+        failedJobs.push({ ...job, status: 'failed', error: result.error ?? `HTTP ${result.status}`, finishedAt: now });
+      }
     }
 
-    const deleting: DeleteJob = { ...job, status: 'deleting', error: null };
-    await deleteJobRepository.put(deleting);
-    callbacks.onJobUpdate(deleting);
+    if (doneJobs.length > 0) {
+      await dbBulkPut(STORE.deleteJobs, doneJobs);
+      const doneFiles = await fileRepository.getMany(doneJobs.map((job) => job.fileId));
+      await dbBulkPut(
+        STORE.files,
+        doneFiles.map((file) => ({ ...file, status: 'deleted' as const })),
+      );
+    }
+    if (failedJobs.length > 0) await dbBulkPut(STORE.deleteJobs, failedJobs);
 
-    try {
-      try {
-        await graph.deleteDriveItem(job.itemId);
-      } catch (e) {
-        // Already gone in OneDrive → treat as deleted.
-        if (!(e instanceof GraphError && e.status === 404)) throw e;
-      }
-      const done: DeleteJob = { ...deleting, status: 'deleted', finishedAt: new Date().toISOString() };
-      await deleteJobRepository.put(done);
-      await fileRepository.setStatus(job.fileId, 'deleted');
-      await duplicateRepository.removeFileFromGroups(job.fileId, job.size);
-      callbacks.onJobUpdate(done);
-    } catch (e) {
-      await failJob(job, messageOf(e), callbacks);
+    for (const job of doneJobs) callbacks.onJobUpdate(job);
+    for (const job of failedJobs) callbacks.onJobUpdate(job);
+    for (const job of retryJobs) callbacks.onJobUpdate(job);
+
+    if (retryJobs.length > 0) {
+      queue = queue.concat(retryJobs);
+      if (waitSeconds > 0 && !signal.aborted) await sleep(waitSeconds * 1000, signal);
     }
   }
+
+  // One bulk pass to drop deleted files from their groups and resolve emptied groups.
+  if (deletedFileIds.length > 0) await duplicateRepository.removeFilesFromGroups(deletedFileIds);
+}
+
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    signal.addEventListener('abort', onAbort);
+  });
 }
 
 async function failJob(job: DeleteJob, error: string, callbacks: ExecuteCallbacks): Promise<void> {

@@ -6,6 +6,7 @@ import type {
 } from '../../features/duplicates/duplicateTypes';
 import {
   STORE,
+  dbBulkDelete,
   dbBulkPut,
   dbClear,
   dbDelete,
@@ -190,5 +191,59 @@ export const duplicateRepository = {
       }
       await dbPut(STORE.duplicateGroups, next);
     }
+  },
+
+  /**
+   * Bulk cleanup after a batch deletion: removes the deleted files from their
+   * groups, recomputes group counts, and resolves groups that have one file
+   * left. Done in a few reads + bulk writes instead of per-file round-trips.
+   */
+  async removeFilesFromGroups(fileIds: string[]): Promise<void> {
+    if (fileIds.length === 0) return;
+    const deleted = new Set(fileIds);
+    const items = await dbGetAll<DuplicateGroupItem>(STORE.duplicateGroupItems);
+
+    const removeItemIds: string[] = [];
+    const survivorsByGroup = new Map<string, DuplicateGroupItem[]>();
+    const affected = new Set<string>();
+    for (const item of items) {
+      if (deleted.has(item.fileId)) {
+        removeItemIds.push(item.id);
+        affected.add(item.groupId);
+      } else {
+        const list = survivorsByGroup.get(item.groupId);
+        if (list) list.push(item);
+        else survivorsByGroup.set(item.groupId, [item]);
+      }
+    }
+    if (removeItemIds.length === 0) return;
+
+    const groups = await dbGetAll<DuplicateGroup>(STORE.duplicateGroups);
+    const groupById = new Map(groups.map((group) => [group.id, group]));
+    const sizeById = new Map((await fileRepository.getAll()).map((file) => [file.id, file.size]));
+
+    const updatedGroups: DuplicateGroup[] = [];
+    for (const groupId of affected) {
+      const group = groupById.get(groupId);
+      if (!group) continue;
+      const survivors = survivorsByGroup.get(groupId) ?? [];
+      if (survivors.length <= 1) {
+        updatedGroups.push({ ...group, fileCount: survivors.length, wastedBytes: 0, status: 'resolved' });
+        continue;
+      }
+      const keepFileId = deleted.has(group.keepFileId) ? survivors[0].fileId : group.keepFileId;
+      const totalBytes = survivors.reduce((sum, item) => sum + (sizeById.get(item.fileId) ?? 0), 0);
+      const keepSize = sizeById.get(keepFileId) ?? 0;
+      updatedGroups.push({
+        ...group,
+        keepFileId,
+        fileCount: survivors.length,
+        totalBytes,
+        wastedBytes: Math.max(0, totalBytes - keepSize),
+      });
+    }
+
+    await dbBulkDelete(STORE.duplicateGroupItems, removeItemIds);
+    await dbBulkPut(STORE.duplicateGroups, updatedGroups);
   },
 };

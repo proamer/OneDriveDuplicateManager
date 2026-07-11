@@ -102,7 +102,7 @@ export function DeleteQueuePage() {
           <div className="page-actions">
             {running ? (
               <button type="button" className="btn btn-outline" onClick={stop}>
-                Stop after current file
+                Stop after current batch
               </button>
             ) : (
               <button type="button" className="btn btn-danger" onClick={() => setConfirmOpen(true)}>
