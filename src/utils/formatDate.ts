@@ -27,6 +27,18 @@ export function formatDuration(startIso: string | null | undefined, endIso: stri
   return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 
+/** Compact remaining-time string for ETAs: "45s", "12m", "2h 15m", "1d 3h". */
+export function formatEta(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return '';
+  if (seconds < 60) return `${Math.max(1, Math.round(seconds))}s`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ${minutes % 60}m`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ${hours % 24}h`;
+}
+
 function parse(iso: string | null | undefined): Date | null {
   if (!iso) return null;
   const date = new Date(iso);

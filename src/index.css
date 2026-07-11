@@ -768,6 +768,13 @@ a {
   font-size: 18px;
   font-weight: 600;
   color: var(--primary);
+  white-space: nowrap;
+}
+
+.scan-eta {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-secondary);
 }
 
 .scan-progress-note {

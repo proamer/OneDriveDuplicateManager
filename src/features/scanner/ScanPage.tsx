@@ -6,7 +6,7 @@ import type { ScanFrontierFolder, ScanSession } from './scanTypes';
 import { FolderPicker } from './FolderPicker';
 import { scanSessionRepository } from '../../services/db/scanSessionRepository';
 import { formatBytes } from '../../utils/formatBytes';
-import { formatDateTime, formatDuration } from '../../utils/formatDate';
+import { formatDateTime, formatDuration, formatEta } from '../../utils/formatDate';
 import { ErrorBanner } from '../../components/common/ErrorBanner';
 import { Spinner } from '../../components/common/Spinner';
 
@@ -61,6 +61,41 @@ export function ScanPage() {
   } else if (foldersScanned + foldersPending > 0) {
     scanPercent = Math.min(99, Math.floor((foldersScanned / (foldersScanned + foldersPending)) * 100));
   }
+
+  // ETA from the scan rate over a sliding window (throttling makes the
+  // instantaneous rate spiky, so average across the last few minutes).
+  const rateSamples = useRef<Array<{ at: number; bytes: number; folders: number }>>([]);
+  if (scanner.phase !== 'scanning') {
+    rateSamples.current = [];
+  } else {
+    const now = Date.now();
+    const samples = rateSamples.current;
+    const last = samples[samples.length - 1];
+    // At most one sample per second keeps the window small under rapid updates.
+    if (!last || now - last.at >= 1000 || bytesSeen < last.bytes) {
+      if (last && bytesSeen < last.bytes) samples.length = 0; // new/restarted scan
+      samples.push({ at: now, bytes: bytesSeen, folders: foldersScanned });
+      rateSamples.current = samples.filter((sample) => now - sample.at <= 180_000);
+    }
+  }
+
+  let etaSeconds: number | null = null;
+  const samples = rateSamples.current;
+  if (scanner.phase === 'scanning' && samples.length >= 2) {
+    const first = samples[0];
+    const latest = samples[samples.length - 1];
+    const elapsed = (latest.at - first.at) / 1000;
+    if (elapsed >= 15) {
+      if (estimatedTotalBytes !== null && estimatedTotalBytes > 0) {
+        const rate = (latest.bytes - first.bytes) / elapsed;
+        if (rate > 0) etaSeconds = Math.max(0, (estimatedTotalBytes - bytesSeen) / rate);
+      } else {
+        const rate = (latest.folders - first.folders) / elapsed;
+        if (rate > 0) etaSeconds = foldersPending / rate;
+      }
+    }
+  }
+  const etaText = etaSeconds !== null ? formatEta(etaSeconds) : '';
 
   return (
     <>
@@ -157,7 +192,10 @@ export function ScanPage() {
               <Spinner />
               <h3>{scanner.phase === 'scanning' ? 'Scanning OneDrive…' : 'Analyzing duplicates…'}</h3>
               {scanner.phase === 'scanning' && scanPercent !== null && (
-                <span className="scan-percent">~{scanPercent}%</span>
+                <span className="scan-percent">
+                  ~{scanPercent}%
+                  {etaText && <span className="scan-eta"> · ~{etaText} left</span>}
+                </span>
               )}
             </div>
             {scanner.phase === 'scanning' && scanPercent !== null ? (
