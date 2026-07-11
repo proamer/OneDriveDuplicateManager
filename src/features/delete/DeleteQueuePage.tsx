@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import type { DeleteJob } from './deleteTypes';
 import { executeDeleteJobs, removeJob, retryJob } from './deleteService';
@@ -7,6 +7,7 @@ import { useAuth } from '../auth/useAuth';
 import { formatBytes } from '../../utils/formatBytes';
 import { ConfirmDialog } from '../../components/common/ConfirmDialog';
 import { EmptyState } from '../../components/common/EmptyState';
+import { Pagination } from '../../components/common/Pagination';
 import { Spinner } from '../../components/common/Spinner';
 
 interface RunSummary {
@@ -15,6 +16,10 @@ interface RunSummary {
   bytes: number;
 }
 
+const PAGE_SIZE = 100;
+/** Cap the confirm-dialog file list so opening it stays instant on huge queues. */
+const CONFIRM_PREVIEW = 200;
+
 export function DeleteQueuePage() {
   const { graph } = useAuth();
   const navigate = useNavigate();
@@ -22,6 +27,8 @@ export function DeleteQueuePage() {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [running, setRunning] = useState(false);
   const [lastRun, setLastRun] = useState<RunSummary | null>(null);
+  const [pendingPage, setPendingPage] = useState(0);
+  const [failedPage, setFailedPage] = useState(0);
   const abortRef = useRef<AbortController | null>(null);
 
   const load = useCallback(async () => {
@@ -34,9 +41,18 @@ export function DeleteQueuePage() {
     return () => abortRef.current?.abort();
   }, [load]);
 
-  const pending = jobs?.filter((job) => job.status === 'pending' || job.status === 'deleting') ?? [];
-  const failed = jobs?.filter((job) => job.status === 'failed') ?? [];
-  const pendingBytes = pending.reduce((sum, job) => sum + job.size, 0);
+  const pending = useMemo(
+    () => jobs?.filter((job) => job.status === 'pending' || job.status === 'deleting') ?? [],
+    [jobs],
+  );
+  const failed = useMemo(() => jobs?.filter((job) => job.status === 'failed') ?? [], [jobs]);
+  const pendingBytes = useMemo(() => pending.reduce((sum, job) => sum + job.size, 0), [pending]);
+
+  // Clamp the active page as the lists shrink (e.g. while a deletion run drains them).
+  const pendingPageSafe = Math.min(pendingPage, Math.max(0, Math.ceil(pending.length / PAGE_SIZE) - 1));
+  const failedPageSafe = Math.min(failedPage, Math.max(0, Math.ceil(failed.length / PAGE_SIZE) - 1));
+  const pendingRows = pending.slice(pendingPageSafe * PAGE_SIZE, pendingPageSafe * PAGE_SIZE + PAGE_SIZE);
+  const failedRows = failed.slice(failedPageSafe * PAGE_SIZE, failedPageSafe * PAGE_SIZE + PAGE_SIZE);
 
   const run = async () => {
     setConfirmOpen(false);
@@ -159,7 +175,7 @@ export function DeleteQueuePage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {pending.map((job) => (
+                  {pendingRows.map((job) => (
                     <tr key={job.id}>
                       <td className="truncate" title={job.name}>
                         {job.name}
@@ -190,6 +206,13 @@ export function DeleteQueuePage() {
                   ))}
                 </tbody>
               </table>
+              <Pagination
+                page={pendingPageSafe}
+                pageSize={PAGE_SIZE}
+                total={pending.length}
+                onPageChange={setPendingPage}
+                label="files"
+              />
             </div>
           )}
 
@@ -211,7 +234,7 @@ export function DeleteQueuePage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {failed.map((job) => (
+                  {failedRows.map((job) => (
                     <tr key={job.id}>
                       <td className="truncate" title={job.name}>
                         {job.name}
@@ -240,6 +263,13 @@ export function DeleteQueuePage() {
                   ))}
                 </tbody>
               </table>
+              <Pagination
+                page={failedPageSafe}
+                pageSize={PAGE_SIZE}
+                total={failed.length}
+                onPageChange={setFailedPage}
+                label="files"
+              />
             </div>
           )}
         </>
@@ -259,11 +289,17 @@ export function DeleteQueuePage() {
           deleted permanently — you can restore files from OneDrive.
         </p>
         <ul className="dialog-file-list mono">
-          {pending.map((job) => (
+          {pending.slice(0, CONFIRM_PREVIEW).map((job) => (
             <li key={job.id} title={`${job.path}/${job.name}`}>
               {job.path === '/' ? '' : job.path}/{job.name}
             </li>
           ))}
+          {pending.length > CONFIRM_PREVIEW && (
+            <li className="dialog-file-more">
+              …and {(pending.length - CONFIRM_PREVIEW).toLocaleString()} more file
+              {pending.length - CONFIRM_PREVIEW === 1 ? '' : 's'}
+            </li>
+          )}
         </ul>
       </ConfirmDialog>
     </>

@@ -6,6 +6,7 @@ import { deleteJobRepository } from '../../services/db/deleteJobRepository';
 import { formatBytes } from '../../utils/formatBytes';
 import { formatDateTime, formatDuration } from '../../utils/formatDate';
 import { EmptyState } from '../../components/common/EmptyState';
+import { Pagination } from '../../components/common/Pagination';
 import { Spinner } from '../../components/common/Spinner';
 
 const SESSION_BADGE: Record<ScanSession['status'], string> = {
@@ -15,9 +16,12 @@ const SESSION_BADGE: Record<ScanSession['status'], string> = {
   failed: 'badge-red',
 };
 
+const DELETIONS_PAGE_SIZE = 100;
+
 export function HistoryPage() {
   const [sessions, setSessions] = useState<ScanSession[] | null>(null);
   const [jobs, setJobs] = useState<DeleteJob[] | null>(null);
+  const [deletionsPage, setDeletionsPage] = useState(0);
 
   useEffect(() => {
     void scanSessionRepository.getAll().then(setSessions);
@@ -33,6 +37,15 @@ export function HistoryPage() {
       </div>
     );
   }
+
+  const deletionsPageSafe = Math.min(
+    deletionsPage,
+    Math.max(0, Math.ceil(jobs.length / DELETIONS_PAGE_SIZE) - 1),
+  );
+  const deletionRows = jobs.slice(
+    deletionsPageSafe * DELETIONS_PAGE_SIZE,
+    deletionsPageSafe * DELETIONS_PAGE_SIZE + DELETIONS_PAGE_SIZE,
+  );
 
   return (
     <>
@@ -98,7 +111,7 @@ export function HistoryPage() {
               </tr>
             </thead>
             <tbody>
-              {jobs.map((job) => (
+              {deletionRows.map((job) => (
                 <tr key={job.id}>
                   <td>{formatDateTime(job.finishedAt)}</td>
                   <td className="truncate" title={job.name}>
@@ -120,6 +133,15 @@ export function HistoryPage() {
               ))}
             </tbody>
           </table>
+        )}
+        {jobs.length > 0 && (
+          <Pagination
+            page={deletionsPageSafe}
+            pageSize={DELETIONS_PAGE_SIZE}
+            total={jobs.length}
+            onPageChange={setDeletionsPage}
+            label="deletions"
+          />
         )}
       </div>
     </>

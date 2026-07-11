@@ -676,6 +676,41 @@ a {
   white-space: nowrap;
 }
 
+/* ---------- Pagination ---------- */
+
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 12px 18px;
+  border-top: 1px solid var(--border);
+}
+
+.pagination-info {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.pagination-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.pagination-page {
+  font-size: 13px;
+  color: var(--text-faint);
+  min-width: 96px;
+  text-align: center;
+}
+
+.dialog-file-more {
+  color: var(--text-faint);
+  font-style: italic;
+}
+
 /* ---------- Empty state / spinner ---------- */
 
 .empty-state {
