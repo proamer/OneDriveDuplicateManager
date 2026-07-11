@@ -62,39 +62,87 @@ export function ScanPage() {
     scanPercent = Math.min(99, Math.floor((foldersScanned / (foldersScanned + foldersPending)) * 100));
   }
 
-  // ETA from the scan rate over a sliding window (throttling makes the
-  // instantaneous rate spiky, so average across the last few minutes).
+  // ETA. The raw bytes/s rate is inherently spiky — one folder holds a few
+  // huge videos, the next holds thousands of tiny files — so three layers of
+  // damping keep the number steady:
+  //  1. blend the whole-run average rate (stable) with a 3-minute window (recent),
+  //  2. exponentially smooth the resulting ETA,
+  //  3. coarsen the displayed value (see formatEta / 5-minute rounding).
   const rateSamples = useRef<Array<{ at: number; bytes: number; folders: number }>>([]);
+  const runFirstSample = useRef<{ at: number; bytes: number; folders: number } | null>(null);
+  const smoothedEta = useRef<number | null>(null);
+
   if (scanner.phase !== 'scanning') {
     rateSamples.current = [];
+    runFirstSample.current = null;
+    smoothedEta.current = null;
   } else {
     const now = Date.now();
+    // bytesSeen going backwards means a new/restarted scan — reset everything.
+    if (runFirstSample.current && bytesSeen < runFirstSample.current.bytes) {
+      rateSamples.current = [];
+      runFirstSample.current = null;
+      smoothedEta.current = null;
+    }
+    if (!runFirstSample.current) {
+      runFirstSample.current = { at: now, bytes: bytesSeen, folders: foldersScanned };
+    }
     const samples = rateSamples.current;
     const last = samples[samples.length - 1];
     // At most one sample per second keeps the window small under rapid updates.
-    if (!last || now - last.at >= 1000 || bytesSeen < last.bytes) {
-      if (last && bytesSeen < last.bytes) samples.length = 0; // new/restarted scan
+    if (!last || now - last.at >= 1000) {
       samples.push({ at: now, bytes: bytesSeen, folders: foldersScanned });
       rateSamples.current = samples.filter((sample) => now - sample.at <= 180_000);
     }
   }
 
   let etaSeconds: number | null = null;
-  const samples = rateSamples.current;
-  if (scanner.phase === 'scanning' && samples.length >= 2) {
-    const first = samples[0];
+  if (scanner.phase === 'scanning' && runFirstSample.current) {
+    const runFirst = runFirstSample.current;
+    const samples = rateSamples.current;
     const latest = samples[samples.length - 1];
-    const elapsed = (latest.at - first.at) / 1000;
-    if (elapsed >= 15) {
+    const runElapsed = latest ? (latest.at - runFirst.at) / 1000 : 0;
+
+    // Wait for enough signal before showing anything.
+    if (latest && runElapsed >= 30) {
+      const overallRate = (latest.bytes - runFirst.bytes) / runElapsed;
+      const overallFolderRate = (latest.folders - runFirst.folders) / runElapsed;
+
+      const windowFirst = samples[0];
+      const windowElapsed = (latest.at - windowFirst.at) / 1000;
+      const windowRate = windowElapsed >= 15 ? (latest.bytes - windowFirst.bytes) / windowElapsed : null;
+      const windowFolderRate =
+        windowElapsed >= 15 ? (latest.folders - windowFirst.folders) / windowElapsed : null;
+
+      let rawEta: number | null = null;
       if (estimatedTotalBytes !== null && estimatedTotalBytes > 0) {
-        const rate = (latest.bytes - first.bytes) / elapsed;
-        if (rate > 0) etaSeconds = Math.max(0, (estimatedTotalBytes - bytesSeen) / rate);
+        // Whole-run average dominates; the recent window nudges it when the
+        // scan genuinely speeds up or slows down (e.g. sustained throttling).
+        const rate =
+          windowRate !== null && windowRate > 0 && overallRate > 0
+            ? overallRate * 0.7 + windowRate * 0.3
+            : overallRate;
+        if (rate > 0) rawEta = Math.max(0, (estimatedTotalBytes - bytesSeen) / rate);
       } else {
-        const rate = (latest.folders - first.folders) / elapsed;
-        if (rate > 0) etaSeconds = foldersPending / rate;
+        const rate =
+          windowFolderRate !== null && windowFolderRate > 0 && overallFolderRate > 0
+            ? overallFolderRate * 0.7 + windowFolderRate * 0.3
+            : overallFolderRate;
+        if (rate > 0) rawEta = foldersPending / rate;
+      }
+
+      if (rawEta !== null) {
+        // Exponential smoothing: each update moves the shown ETA only 15%
+        // toward the new value, so single outlier folders barely register.
+        smoothedEta.current =
+          smoothedEta.current === null ? rawEta : smoothedEta.current * 0.85 + rawEta * 0.15;
+        etaSeconds = smoothedEta.current;
       }
     }
   }
+
+  // Coarsen long ETAs to 5-minute steps so the text doesn't flicker.
+  if (etaSeconds !== null && etaSeconds > 3600) etaSeconds = Math.round(etaSeconds / 300) * 300;
   const etaText = etaSeconds !== null ? formatEta(etaSeconds) : '';
 
   return (
