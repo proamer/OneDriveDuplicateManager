@@ -3,7 +3,6 @@ import { createOneDriveService, type GraphDriveItem } from '../services/graph/on
 import { fileRepository } from '../services/db/fileRepository';
 import { scanSessionRepository } from '../services/db/scanSessionRepository';
 import {
-  IMAGE_MIME_TYPES,
   type FileRecord,
   type ScanSession,
   type ScanWorkerRequest,
@@ -51,7 +50,7 @@ self.onmessage = (event: MessageEvent<ScanWorkerRequest>) => {
   const message = event.data;
   if (message.type === 'start') {
     accessToken = message.accessToken;
-    void runScan(message.sessionId);
+    void runScan(message.sessionId, message.resume);
   } else if (message.type === 'cancel') {
     cancelled = true;
     abortController.abort();
@@ -61,17 +60,44 @@ self.onmessage = (event: MessageEvent<ScanWorkerRequest>) => {
   }
 };
 
-async function runScan(sessionId: string): Promise<void> {
+async function runScan(sessionId: string, resume: boolean): Promise<void> {
   const session = await scanSessionRepository.get(sessionId);
   if (!session) {
     post({ type: 'error', error: 'Scan session not found.' });
     return;
   }
 
+  // Breadth-first walk of the folder tree. The queue head is processed next;
+  // it is only removed once the folder is fully scanned, so a crash mid-folder
+  // resumes by reprocessing that folder (writes are keyed by item id, so re-runs
+  // are idempotent).
+  let queue: Array<{ itemId: string | null; path: string }> = [{ itemId: null, path: '/' }];
   let itemsSeen = 0;
   let imagesFound = 0;
   let foldersScanned = 0;
   let totalBytes = 0;
+
+  if (resume) {
+    const checkpoint = await scanSessionRepository.getCheckpoint();
+    if (checkpoint && checkpoint.sessionId === sessionId && checkpoint.queue.length > 0) {
+      queue = checkpoint.queue;
+      itemsSeen = checkpoint.itemsSeen;
+      imagesFound = checkpoint.imagesFound;
+      foldersScanned = checkpoint.foldersScanned;
+      totalBytes = checkpoint.totalBytes;
+    }
+  }
+
+  const saveCheckpoint = () =>
+    scanSessionRepository.saveCheckpoint({
+      sessionId,
+      queue,
+      itemsSeen,
+      imagesFound,
+      foldersScanned,
+      totalBytes,
+      updatedAt: new Date().toISOString(),
+    });
 
   const postProgress = (currentPath: string) => {
     post({
@@ -104,12 +130,14 @@ async function runScan(sessionId: string): Promise<void> {
 
   try {
     // Breadth-first walk of the folder tree via /children (200 items per page).
-    const queue: Array<{ itemId: string | null; path: string }> = [{ itemId: null, path: '/' }];
-
     while (queue.length > 0 && !cancelled) {
-      const folder = queue.shift()!;
+      const folder = queue[0];
       foldersScanned++;
       postProgress(folder.path);
+
+      // Subfolders are staged locally and only committed to the persisted queue
+      // once the whole folder is done, so a crash mid-folder never loses them.
+      const discovered: Array<{ itemId: string | null; path: string }> = [];
 
       let page =
         folder.itemId === null
@@ -122,11 +150,12 @@ async function runScan(sessionId: string): Promise<void> {
         for (const item of page.value) {
           itemsSeen++;
           if (item.folder) {
-            queue.push({ itemId: item.id, path: joinPath(folder.path, item.name) });
+            discovered.push({ itemId: item.id, path: joinPath(folder.path, item.name) });
             continue;
           }
-          const mimeType = item.file?.mimeType ?? '';
-          if (!IMAGE_MIME_TYPES.has(mimeType)) continue;
+          // Index every file (not just images) — any file type can have exact
+          // duplicates. Items without a file facet (e.g. OneNote, bundles) are skipped.
+          if (!item.file) continue;
           const record = toFileRecord(item, folder.path, sessionId);
           if (record) {
             records.push(record);
@@ -141,9 +170,17 @@ async function runScan(sessionId: string): Promise<void> {
         if (!nextLink) break;
         page = await graph.listChildrenPage(nextLink, abortController.signal);
       }
+
+      if (cancelled) break;
+
+      // Folder finished: drop it from the frontier, append its subfolders, and
+      // checkpoint so a later resume continues from exactly here.
+      queue = [...queue.slice(1), ...discovered];
+      await saveCheckpoint();
     }
 
     if (cancelled) {
+      // Keep the checkpoint so the user can resume the cancelled scan later.
       const finished = await finishSession('cancelled', null);
       await scanSessionRepository.setLastFinished(sessionId);
       post({ type: 'done', session: finished });
@@ -153,6 +190,7 @@ async function runScan(sessionId: string): Promise<void> {
     // Full scan completed — records not touched by this session belong to files
     // that no longer exist in OneDrive.
     await fileRepository.purgeNotInSession(sessionId);
+    await scanSessionRepository.clearCheckpoint();
     const finished = await finishSession('completed', null);
     await scanSessionRepository.setLastFinished(sessionId);
     post({ type: 'done', session: finished });
@@ -163,6 +201,8 @@ async function runScan(sessionId: string): Promise<void> {
       post({ type: 'done', session: finished });
       return;
     }
+    // Leave the checkpoint in place so the scan can resume from the last
+    // completed folder instead of starting over.
     const error = messageOf(e);
     await finishSession('failed', error);
     post({ type: 'error', error });

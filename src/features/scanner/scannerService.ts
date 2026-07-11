@@ -23,6 +23,10 @@ export interface ScannerState {
   duplicateFiles: number;
   wastedBytes: number;
   error: string | null;
+  /** An interrupted scan can be resumed from its last checkpoint. */
+  resumable: boolean;
+  /** Progress captured in the resumable checkpoint, for display. */
+  resumeInfo: { imagesFound: number; foldersScanned: number } | null;
 }
 
 const INITIAL_PROGRESS: ScanProgress = {
@@ -42,6 +46,8 @@ const INITIAL_STATE: ScannerState = {
   duplicateFiles: 0,
   wastedBytes: 0,
   error: null,
+  resumable: false,
+  resumeInfo: null,
 };
 
 // Module-level singleton so an in-flight scan survives route changes.
@@ -70,7 +76,24 @@ export const scannerService = {
     return state.phase === 'scanning' || state.phase === 'grouping';
   },
 
-  async start(getAccessToken: () => Promise<string | null>): Promise<void> {
+  /** Reads the persisted checkpoint (if any) and exposes whether a scan can be resumed. */
+  async checkResumable(): Promise<boolean> {
+    const checkpoint = await scanSessionRepository.getCheckpoint();
+    const resumable = !!checkpoint && checkpoint.queue.length > 0;
+    setState({
+      resumable,
+      resumeInfo:
+        resumable && checkpoint
+          ? { imagesFound: checkpoint.imagesFound, foldersScanned: checkpoint.foldersScanned }
+          : null,
+    });
+    return resumable;
+  },
+
+  async start(
+    getAccessToken: () => Promise<string | null>,
+    options: { resume?: boolean } = {},
+  ): Promise<void> {
     if (scannerService.isBusy()) return;
 
     let token: string | null = null;
@@ -84,29 +107,60 @@ export const scannerService = {
       return;
     }
 
-    const session: ScanSession = {
-      id: crypto.randomUUID(),
-      startedAt: new Date().toISOString(),
-      finishedAt: null,
-      status: 'running',
-      itemsSeen: 0,
-      filesScanned: 0,
-      foldersScanned: 0,
-      totalBytes: 0,
-      error: null,
-    };
-    await scanSessionRepository.put(session);
+    const checkpoint = await scanSessionRepository.getCheckpoint();
+    const resume = options.resume === true && !!checkpoint && checkpoint.queue.length > 0;
 
-    setState({
-      phase: 'scanning',
-      sessionId: session.id,
-      progress: INITIAL_PROGRESS,
-      session: null,
-      groupsFound: 0,
-      duplicateFiles: 0,
-      wastedBytes: 0,
-      error: null,
-    });
+    let sessionId: string;
+    if (resume && checkpoint) {
+      sessionId = checkpoint.sessionId;
+      setState({
+        phase: 'scanning',
+        sessionId,
+        progress: {
+          itemsSeen: checkpoint.itemsSeen,
+          imagesFound: checkpoint.imagesFound,
+          foldersScanned: checkpoint.foldersScanned,
+          currentPath: '',
+          message: 'Resuming scan…',
+        },
+        session: null,
+        groupsFound: 0,
+        duplicateFiles: 0,
+        wastedBytes: 0,
+        error: null,
+        resumable: false,
+        resumeInfo: null,
+      });
+    } else {
+      // Fresh scan: drop any stale checkpoint so we start from the drive root.
+      if (checkpoint) await scanSessionRepository.clearCheckpoint();
+      const session: ScanSession = {
+        id: crypto.randomUUID(),
+        startedAt: new Date().toISOString(),
+        finishedAt: null,
+        status: 'running',
+        itemsSeen: 0,
+        filesScanned: 0,
+        foldersScanned: 0,
+        totalBytes: 0,
+        error: null,
+      };
+      await scanSessionRepository.put(session);
+      sessionId = session.id;
+
+      setState({
+        phase: 'scanning',
+        sessionId,
+        progress: INITIAL_PROGRESS,
+        session: null,
+        groupsFound: 0,
+        duplicateFiles: 0,
+        wastedBytes: 0,
+        error: null,
+        resumable: false,
+        resumeInfo: null,
+      });
+    }
 
     const worker = new Worker(new URL('../../workers/scanWorker.ts', import.meta.url), { type: 'module' });
     scanWorker = worker;
@@ -138,6 +192,7 @@ export const scannerService = {
           worker.terminate();
           scanWorker = null;
           setState({ phase: 'error', error: message.error });
+          void scannerService.checkResumable();
           break;
       }
     };
@@ -145,9 +200,10 @@ export const scannerService = {
       worker.terminate();
       scanWorker = null;
       setState({ phase: 'error', error: event.message || 'Scan worker crashed.' });
+      void scannerService.checkResumable();
     };
 
-    worker.postMessage({ type: 'start', sessionId: session.id, accessToken: token } satisfies ScanWorkerRequest);
+    worker.postMessage({ type: 'start', sessionId, resume, accessToken: token } satisfies ScanWorkerRequest);
   },
 
   cancel(): void {
@@ -165,6 +221,7 @@ export const scannerService = {
 function startGrouping(session: ScanSession): void {
   if (session.filesScanned === 0) {
     setState({ phase: 'completed', groupsFound: 0, duplicateFiles: 0, wastedBytes: 0 });
+    void scannerService.checkResumable();
     return;
   }
 
@@ -183,6 +240,8 @@ function startGrouping(session: ScanSession): void {
         duplicateFiles: message.duplicateFiles,
         wastedBytes: message.wastedBytes,
       });
+      // A cancelled scan keeps its checkpoint, so it can still be resumed.
+      void scannerService.checkResumable();
     } else {
       worker.terminate();
       setState({ phase: 'error', error: message.error });

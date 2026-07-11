@@ -45,10 +45,12 @@ export interface GraphUser {
   userPrincipalName?: string;
 }
 
+// Thumbnails are intentionally NOT expanded here: $expand=thumbnails makes Graph
+// generate a preview for every item and is a major throttling/slowdown source on
+// large drives. The review page fetches thumbnails lazily for the files it shows.
 const CHILD_PARAMS =
   '?$top=200' +
-  '&$select=id,name,size,webUrl,createdDateTime,lastModifiedDateTime,file,folder,image,parentReference' +
-  '&$expand=thumbnails($select=medium)';
+  '&$select=id,name,size,webUrl,createdDateTime,lastModifiedDateTime,file,folder,image,parentReference';
 
 export function createOneDriveService(client: GraphClient) {
   return {

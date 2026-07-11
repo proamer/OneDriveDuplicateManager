@@ -89,7 +89,7 @@ export function DashboardPage() {
           <Spinner size={14} />
           <span>
             {scanner.phase === 'scanning'
-              ? `Scan in progress — ${scanner.progress.imagesFound.toLocaleString()} images found so far.`
+              ? `Scan in progress — ${scanner.progress.imagesFound.toLocaleString()} files found so far.`
               : 'Scan finished — analyzing duplicates…'}
           </span>
           <Link to="/scan" className="banner-link">
@@ -113,7 +113,7 @@ export function DashboardPage() {
       {data.session ? (
         <div className="stat-grid">
           <div className="stat card">
-            <span className="stat-label">Scanned images</span>
+            <span className="stat-label">Scanned files</span>
             <span className="stat-value">{data.session.filesScanned.toLocaleString()}</span>
             <span className="stat-sub">{formatBytes(data.session.totalBytes)} across your OneDrive</span>
           </div>
@@ -138,7 +138,7 @@ export function DashboardPage() {
           <div className="card">
             <EmptyState
               title="No scan yet"
-              description="Run your first scan to index the photos in your OneDrive and find exact duplicates. The scan reads metadata only — no photos are downloaded."
+              description="Run your first scan to index the files in your OneDrive and find exact duplicates. The scan reads metadata only — no files are downloaded."
               action={
                 <button type="button" className="btn btn-primary" onClick={() => navigate('/scan?autostart=1')}>
                   Start first scan
@@ -153,7 +153,7 @@ export function DashboardPage() {
         <div className="card">
           <EmptyState
             title="No duplicates found"
-            description="Your last scan found no exact duplicate images. Nice and tidy."
+            description="Your last scan found no exact duplicate files. Nice and tidy."
             action={
               <button type="button" className="btn btn-outline" onClick={() => navigate('/scan?autostart=1')}>
                 Scan again

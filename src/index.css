@@ -491,6 +491,17 @@ a {
   font-weight: 600;
 }
 
+.resume-banner {
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.resume-actions {
+  display: flex;
+  gap: 8px;
+  flex: none;
+}
+
 /* ---------- Tables ---------- */
 
 .table {

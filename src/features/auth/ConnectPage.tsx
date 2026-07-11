@@ -28,11 +28,11 @@ export function ConnectPage() {
           <h1>OneDrive Duplicate Cleaner</h1>
         </div>
         <p className="connect-lede">
-          Find and clean up duplicate photos in your OneDrive — entirely in your browser. No server, no
+          Find and clean up duplicate files in your OneDrive — entirely in your browser. No server, no
           uploads, no automatic deletion.
         </p>
         <ul className="connect-points">
-          <li>Scans image metadata and file hashes only — photos are never downloaded.</li>
+          <li>Scans file metadata and hashes only — your files are never downloaded.</li>
           <li>You review every duplicate group before anything happens.</li>
           <li>Removed files go to the OneDrive recycle bin, never deleted permanently.</li>
         </ul>

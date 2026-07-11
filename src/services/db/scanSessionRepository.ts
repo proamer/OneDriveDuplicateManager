@@ -1,7 +1,8 @@
-import type { ScanSession } from '../../features/scanner/scanTypes';
-import { STORE, dbGet, dbGetAll, dbPut, getSetting, setSetting } from './indexedDb';
+import type { ScanCheckpoint, ScanSession } from '../../features/scanner/scanTypes';
+import { STORE, dbGet, dbGetAll, dbPut, getSetting, removeSetting, setSetting } from './indexedDb';
 
 const LAST_SESSION_KEY = 'lastScanSessionId';
+const CHECKPOINT_KEY = 'scanCheckpoint';
 
 export const scanSessionRepository = {
   put(session: ScanSession): Promise<void> {
@@ -24,5 +25,18 @@ export const scanSessionRepository = {
 
   setLastFinished(id: string): Promise<void> {
     return setSetting(LAST_SESSION_KEY, id);
+  },
+
+  /** Walk state for resuming an interrupted scan. Written after each folder completes. */
+  saveCheckpoint(checkpoint: ScanCheckpoint): Promise<void> {
+    return setSetting(CHECKPOINT_KEY, checkpoint);
+  },
+
+  getCheckpoint(): Promise<ScanCheckpoint | undefined> {
+    return getSetting<ScanCheckpoint>(CHECKPOINT_KEY);
+  },
+
+  clearCheckpoint(): Promise<void> {
+    return removeSetting(CHECKPOINT_KEY);
   },
 };

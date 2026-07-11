@@ -239,6 +239,10 @@ export function setSetting<T>(key: string, value: T): Promise<void> {
   return dbPut(STORE.appSettings, { key, value } satisfies SettingRecord<T>);
 }
 
+export function removeSetting(key: string): Promise<void> {
+  return dbDelete(STORE.appSettings, key);
+}
+
 export async function clearAllData(): Promise<void> {
   for (const name of Object.values(STORE)) {
     await dbClear(name);

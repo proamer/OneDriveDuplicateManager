@@ -17,14 +17,25 @@ export function ScanPage() {
   const [lastSession, setLastSession] = useState<ScanSession | null>(null);
   const autostarted = useRef(false);
 
-  const start = () => void scannerService.start(getAccessToken);
+  const startFresh = () => void scannerService.start(getAccessToken, { resume: false });
+  const resumeScan = () => void scannerService.start(getAccessToken, { resume: true });
 
   useEffect(() => {
-    if (searchParams.get('autostart') === '1' && !autostarted.current) {
-      autostarted.current = true;
-      setSearchParams({}, { replace: true });
-      if (scanner.phase === 'idle' || scanner.phase === 'completed') start();
-    }
+    let disposed = false;
+    void (async () => {
+      const canResume = await scannerService.checkResumable();
+      if (disposed) return;
+      if (searchParams.get('autostart') === '1' && !autostarted.current) {
+        autostarted.current = true;
+        setSearchParams({}, { replace: true });
+        const phase = scannerService.getState().phase;
+        // Don't auto-start a fresh scan over a resumable one — let the user choose.
+        if (!canResume && (phase === 'idle' || phase === 'completed')) startFresh();
+      }
+    })();
+    return () => {
+      disposed = true;
+    };
     // Mount-only: autostart must fire once, not on every phase change.
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -40,27 +51,46 @@ export function ScanPage() {
         <div>
           <h1>Scan</h1>
           <p className="page-subtitle">
-            Walks your OneDrive folder tree and indexes image metadata — nothing is downloaded or changed.
+            Walks your OneDrive folder tree and indexes file metadata — nothing is downloaded or changed.
           </p>
         </div>
       </div>
+
+      {scanner.resumable && scanner.phase !== 'scanning' && scanner.phase !== 'grouping' && (
+        <div className="banner banner-warn resume-banner">
+          <span>
+            A previous scan was interrupted after{' '}
+            <strong>{(scanner.resumeInfo?.imagesFound ?? 0).toLocaleString()}</strong> files across{' '}
+            {(scanner.resumeInfo?.foldersScanned ?? 0).toLocaleString()} folders. Resume to continue where it
+            left off instead of starting over.
+          </span>
+          <div className="resume-actions">
+            <button type="button" className="btn btn-primary btn-sm" onClick={resumeScan}>
+              Resume scan
+            </button>
+            <button type="button" className="btn btn-outline btn-sm" onClick={startFresh}>
+              Start over
+            </button>
+          </div>
+        </div>
+      )}
 
       {scanner.phase === 'idle' && (
         <div className="card">
           <div className="card-body scan-idle">
             <h3>Ready to scan</h3>
             <p>
-              The scan collects name, path, size, hashes and thumbnails for JPEG, PNG, WebP and HEIC/HEIF
-              files, then finds exact duplicates by size + file hash. You can cancel at any time; partial
-              results are kept.
+              The scan collects name, path, size and file hashes for every file, then finds exact duplicates
+              by size + hash. You can cancel at any time; partial results are kept and the scan can be resumed
+              later.
             </p>
-            <button type="button" className="btn btn-primary" onClick={start}>
+            <button type="button" className="btn btn-primary" onClick={startFresh}>
               Start Scan
             </button>
             {lastSession && (
               <p className="scan-last">
                 Last scan: {formatDateTime(lastSession.finishedAt ?? lastSession.startedAt)} ·{' '}
-                {lastSession.filesScanned.toLocaleString()} images · {lastSession.status}
+                {lastSession.filesScanned.toLocaleString()} files · {lastSession.status}
               </p>
             )}
           </div>
@@ -81,7 +111,7 @@ export function ScanPage() {
                 <span className="stat-value-sm">{scanner.progress.itemsSeen.toLocaleString()}</span>
               </div>
               <div>
-                <span className="stat-label">Images found</span>
+                <span className="stat-label">Files indexed</span>
                 <span className="stat-value-sm">{scanner.progress.imagesFound.toLocaleString()}</span>
               </div>
               <div>
@@ -115,7 +145,7 @@ export function ScanPage() {
             </h3>
             <div className="scan-stats">
               <div>
-                <span className="stat-label">Images indexed</span>
+                <span className="stat-label">Files indexed</span>
                 <span className="stat-value-sm">{scanner.session.filesScanned.toLocaleString()}</span>
               </div>
               <div>
@@ -146,7 +176,7 @@ export function ScanPage() {
               ) : (
                 <p className="scan-clean">No exact duplicates found. Your library is clean.</p>
               )}
-              <button type="button" className="btn btn-outline" onClick={start}>
+              <button type="button" className="btn btn-outline" onClick={startFresh}>
                 Scan Again
               </button>
             </div>
@@ -157,7 +187,12 @@ export function ScanPage() {
       {scanner.phase === 'error' && (
         <div className="card">
           <div className="card-body">
-            <ErrorBanner message={scanner.error ?? 'Scan failed.'} onRetry={start} retryLabel="Try again" />
+            {/* When resumable, the banner above offers Resume / Start over instead. */}
+            <ErrorBanner
+              message={scanner.error ?? 'Scan failed.'}
+              onRetry={scanner.resumable ? undefined : startFresh}
+              retryLabel="Try again"
+            />
           </div>
         </div>
       )}

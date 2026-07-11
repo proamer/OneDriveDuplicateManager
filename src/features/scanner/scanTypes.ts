@@ -55,8 +55,28 @@ export interface ScanProgress {
   message: string;
 }
 
+/** A pending folder in the breadth-first walk. `itemId: null` is the drive root. */
+export interface ScanFrontierFolder {
+  itemId: string | null;
+  path: string;
+}
+
+/**
+ * Persisted walk state so an interrupted scan can resume instead of restarting.
+ * Saved after each folder completes; the queue head is always processed next.
+ */
+export interface ScanCheckpoint {
+  sessionId: string;
+  queue: ScanFrontierFolder[];
+  itemsSeen: number;
+  imagesFound: number;
+  foldersScanned: number;
+  totalBytes: number;
+  updatedAt: string;
+}
+
 export type ScanWorkerRequest =
-  | { type: 'start'; sessionId: string; accessToken: string }
+  | { type: 'start'; sessionId: string; resume: boolean; accessToken: string }
   | { type: 'cancel' }
   | { type: 'token'; requestId: number; accessToken: string | null };
 
