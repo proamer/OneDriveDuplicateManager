@@ -1,20 +1,36 @@
 import type { DeleteJob } from './deleteTypes';
+import type { FileRecord } from '../scanner/scanTypes';
 import { deleteJobRepository } from '../../services/db/deleteJobRepository';
 import { duplicateRepository } from '../../services/db/duplicateRepository';
 import { fileRepository } from '../../services/db/fileRepository';
+import { STORE, dbBulkPut } from '../../services/db/indexedDb';
 import { GraphError } from '../../services/graph/graphClient';
 import type { OneDriveService } from '../../services/graph/oneDriveService';
 import { messageOf } from '../../utils/errorMessage';
 
-/** Turns every marked review item into a pending delete job. Keep files are never queued. */
+/**
+ * Turns every marked review item into a pending delete job. Keep files are never
+ * queued. Reads and writes in bulk so queueing thousands of files stays fast.
+ */
 export async function queueMarkedFiles(): Promise<{ queued: number; skipped: number }> {
   const marked = await duplicateRepository.getMarkedItems();
+  if (marked.length === 0) return { queued: 0, skipped: 0 };
+
+  const groups = new Map((await duplicateRepository.getAllGroups()).map((group) => [group.id, group]));
+  const files = new Map(
+    (await fileRepository.getMany(marked.map((item) => item.fileId))).map((file) => [file.id, file]),
+  );
+  const existingJobs = new Map((await deleteJobRepository.getAll()).map((job) => [job.id, job]));
+
+  const now = new Date().toISOString();
+  const newJobs: DeleteJob[] = [];
+  const filesToQueue: FileRecord[] = [];
   let queued = 0;
   let skipped = 0;
 
   for (const item of marked) {
-    const group = await duplicateRepository.getGroup(item.groupId);
-    const file = await fileRepository.get(item.fileId);
+    const group = groups.get(item.groupId);
+    const file = files.get(item.fileId);
     if (!group || !file || group.status !== 'pending' || file.status === 'deleted') {
       skipped++;
       continue;
@@ -23,13 +39,13 @@ export async function queueMarkedFiles(): Promise<{ queued: number; skipped: num
       skipped++;
       continue;
     }
-    const existing = await deleteJobRepository.get(item.fileId);
+    const existing = existingJobs.get(item.fileId);
     if (existing && (existing.status === 'pending' || existing.status === 'deleting')) {
       skipped++;
       continue;
     }
 
-    await deleteJobRepository.put({
+    newJobs.push({
       id: file.id,
       fileId: file.id,
       driveId: file.driveId,
@@ -40,13 +56,15 @@ export async function queueMarkedFiles(): Promise<{ queued: number; skipped: num
       groupId: group.id,
       status: 'pending',
       error: null,
-      createdAt: new Date().toISOString(),
+      createdAt: now,
       finishedAt: null,
     });
-    await fileRepository.setStatus(file.id, 'queued');
+    filesToQueue.push({ ...file, status: 'queued' });
     queued++;
   }
 
+  await dbBulkPut(STORE.deleteJobs, newJobs);
+  await dbBulkPut(STORE.files, filesToQueue);
   return { queued, skipped };
 }
 

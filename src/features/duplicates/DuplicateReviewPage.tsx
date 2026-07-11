@@ -16,6 +16,9 @@ export function DuplicateReviewPage() {
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const [marked, setMarked] = useState({ count: 0, bytes: 0 });
   const [queueing, setQueueing] = useState(false);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  // Bumped after a bulk mark/clear so open GroupCards remount and reflect the change.
+  const [reloadKey, setReloadKey] = useState(0);
 
   const load = useCallback(async () => {
     const [pendingGroups, summary] = await Promise.all([
@@ -33,6 +36,28 @@ export function DuplicateReviewPage() {
   const refreshMarked = useCallback(() => {
     void duplicateRepository.getMarkedSummary().then(setMarked);
   }, []);
+
+  const selectAll = async () => {
+    setBulkBusy(true);
+    try {
+      await duplicateRepository.markAllPendingExceptKeep();
+      setMarked(await duplicateRepository.getMarkedSummary());
+      setReloadKey((key) => key + 1);
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
+  const clearAll = async () => {
+    setBulkBusy(true);
+    try {
+      await duplicateRepository.clearAllMarks();
+      setMarked(await duplicateRepository.getMarkedSummary());
+      setReloadKey((key) => key + 1);
+    } finally {
+      setBulkBusy(false);
+    }
+  };
 
   const addToQueue = async () => {
     setQueueing(true);
@@ -66,7 +91,31 @@ export function DuplicateReviewPage() {
                 'Pick which file to keep, mark the rest for deletion.'}
           </p>
         </div>
+        {groups.length > 0 && (
+          <div className="page-actions">
+            <button type="button" className="btn btn-primary" onClick={() => void selectAll()} disabled={bulkBusy}>
+              {bulkBusy ? 'Working…' : 'Select all duplicates'}
+            </button>
+            <button
+              type="button"
+              className="btn btn-outline"
+              onClick={() => void clearAll()}
+              disabled={bulkBusy || marked.count === 0}
+            >
+              Clear selection
+            </button>
+          </div>
+        )}
       </div>
+
+      {groups.length > 0 && (
+        <div className="banner banner-info">
+          <span>
+            <strong>Select all duplicates</strong> marks every copy for deletion except the recommended keep
+            file in each group. Review the keep choices first, then add everything to the delete queue.
+          </span>
+        </div>
+      )}
 
       {groups.length === 0 ? (
         <div className="card">
@@ -84,7 +133,12 @@ export function DuplicateReviewPage() {
         <>
           <div className="group-list">
             {groups.slice(0, visibleCount).map((group) => (
-              <GroupCard key={group.id} group={group} onMutate={refreshMarked} onRemoved={() => void load()} />
+              <GroupCard
+                key={`${group.id}:${reloadKey}`}
+                group={group}
+                onMutate={refreshMarked}
+                onRemoved={() => void load()}
+              />
             ))}
           </div>
           {groups.length > visibleCount && (

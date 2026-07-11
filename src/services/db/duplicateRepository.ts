@@ -87,6 +87,45 @@ export const duplicateRepository = {
     await dbBulkPut(STORE.duplicateGroupItems, updated);
   },
 
+  /**
+   * Across every pending group, marks all deletable copies (all except each
+   * group's keep file, active files only) in a single bulk write. Built for
+   * libraries with thousands of groups where per-item toggling is impractical.
+   * Returns how many files are now marked.
+   */
+  async markAllPendingExceptKeep(): Promise<number> {
+    const groups = await dbGetAll<DuplicateGroup>(STORE.duplicateGroups);
+    const pendingById = new Map(
+      groups.filter((group) => group.status === 'pending').map((group) => [group.id, group]),
+    );
+    if (pendingById.size === 0) return 0;
+
+    const items = await dbGetAll<DuplicateGroupItem>(STORE.duplicateGroupItems);
+    const files = await fileRepository.getAll();
+    const activeIds = new Set(files.filter((file) => file.status === 'active').map((file) => file.id));
+
+    let markedCount = 0;
+    const changed: DuplicateGroupItem[] = [];
+    for (const item of items) {
+      const group = pendingById.get(item.groupId);
+      if (!group) continue;
+      const marked = item.fileId !== group.keepFileId && activeIds.has(item.fileId);
+      if (marked) markedCount++;
+      if (item.markedForDelete !== marked) changed.push({ ...item, markedForDelete: marked });
+    }
+    await dbBulkPut(STORE.duplicateGroupItems, changed);
+    return markedCount;
+  },
+
+  /** Clears every deletion mark across all groups in one bulk write. */
+  async clearAllMarks(): Promise<void> {
+    const items = await dbGetAll<DuplicateGroupItem>(STORE.duplicateGroupItems);
+    const cleared = items
+      .filter((item) => item.markedForDelete)
+      .map((item) => ({ ...item, markedForDelete: false }));
+    await dbBulkPut(STORE.duplicateGroupItems, cleared);
+  },
+
   async ignoreGroup(groupId: string): Promise<void> {
     const group = await dbGet<DuplicateGroup>(STORE.duplicateGroups, groupId);
     if (!group) return;
