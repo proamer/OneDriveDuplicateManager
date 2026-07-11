@@ -48,9 +48,20 @@ export function openDb(): Promise<IDBDatabase> {
         }
       };
       request.onsuccess = () => {
+        const db = request.result;
         // Another tab upgrading the schema needs us to release the connection.
-        request.result.onversionchange = () => request.result.close();
-        resolve(request.result);
+        db.onversionchange = () => {
+          db.close();
+          dbPromise = null;
+        };
+        // iOS Safari quietly drops IndexedDB connections when the tab is
+        // backgrounded or a Web Worker is suspended (common during a long scan
+        // with throttling waits). Forget the dead handle so the next call
+        // reopens instead of failing on a stale connection.
+        db.onclose = () => {
+          dbPromise = null;
+        };
+        resolve(db);
       };
       request.onerror = () => reject(request.error ?? new Error('Failed to open IndexedDB'));
     });
@@ -61,6 +72,13 @@ export function openDb(): Promise<IDBDatabase> {
   return dbPromise;
 }
 
+/** Drops the cached connection (closing it if possible) so the next call reopens fresh. */
+function invalidateConnection(): void {
+  const pending = dbPromise;
+  dbPromise = null;
+  void pending?.then((db) => db.close()).catch(() => undefined);
+}
+
 function requestToPromise<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     request.onsuccess = () => resolve(request.result);
@@ -68,25 +86,55 @@ function requestToPromise<T>(request: IDBRequest<T>): Promise<T> {
   });
 }
 
+/** Transient transaction failures (stale connection after a suspend) are retried this many times. */
+const MAX_TX_ATTEMPTS = 4;
+
+/**
+ * QuotaExceededError means the browser is out of storage — retrying cannot help,
+ * so surface it. Everything else is treated as a transient connection hiccup.
+ */
+function isTransientDbError(error: unknown): boolean {
+  return !(error instanceof DOMException && error.name === 'QuotaExceededError');
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
  * Runs `fn` inside a transaction. `fn` must only await IndexedDB requests from the
  * same transaction — awaiting anything else (fetch, timers) auto-commits the transaction.
+ *
+ * IndexedDB transactions are atomic, so a failed attempt commits nothing and is safe to
+ * retry: on failure we drop the (possibly dead) connection and reopen a fresh one.
  */
 async function withStore<T>(
   name: StoreName,
   mode: IDBTransactionMode,
   fn: (store: IDBObjectStore) => Promise<T> | T,
 ): Promise<T> {
-  const db = await openDb();
-  const tx = db.transaction(name, mode);
-  const done = new Promise<void>((resolve, reject) => {
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error ?? new Error('IndexedDB transaction failed'));
-    tx.onabort = () => reject(tx.error ?? new Error('IndexedDB transaction aborted'));
-  });
-  const result = await fn(tx.objectStore(name));
-  await done;
-  return result;
+  let lastError: unknown;
+  for (let attempt = 0; attempt < MAX_TX_ATTEMPTS; attempt++) {
+    try {
+      const db = await openDb();
+      // db.transaction() throws synchronously (InvalidStateError) on a closing connection.
+      const tx = db.transaction(name, mode);
+      const done = new Promise<void>((resolve, reject) => {
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error ?? new Error('IndexedDB transaction failed'));
+        tx.onabort = () => reject(tx.error ?? new Error('IndexedDB transaction aborted'));
+      });
+      const result = await fn(tx.objectStore(name));
+      await done;
+      return result;
+    } catch (error) {
+      lastError = error;
+      invalidateConnection();
+      if (!isTransientDbError(error) || attempt === MAX_TX_ATTEMPTS - 1) break;
+      await delay(100 * 2 ** attempt);
+    }
+  }
+  throw lastError;
 }
 
 export function dbGet<T>(name: StoreName, key: IDBValidKey): Promise<T | undefined> {
@@ -139,30 +187,42 @@ export function dbCount(name: StoreName): Promise<number> {
   return withStore(name, 'readonly', (store) => requestToPromise(store.count()));
 }
 
-/** Cursor-based filtered delete — memory-safe for large stores. Returns deleted count. */
-export function dbDeleteWhere<T>(name: StoreName, predicate: (value: T) => boolean): Promise<number> {
-  return withStore(
+/** Keys are deleted in chunks this size so no single transaction runs too long on iOS Safari. */
+const DELETE_BATCH_SIZE = 500;
+
+/**
+ * Filtered delete for large stores. Collects matching keys in a read-only pass, then deletes
+ * them in small batches — one giant readwrite transaction over tens of thousands of records
+ * is a common failure point on iOS Safari. Returns the deleted count.
+ */
+export async function dbDeleteWhere<T>(
+  name: StoreName,
+  predicate: (value: T) => boolean,
+): Promise<number> {
+  const keys = await withStore(
     name,
-    'readwrite',
+    'readonly',
     (store) =>
-      new Promise<number>((resolve, reject) => {
-        let deleted = 0;
+      new Promise<IDBValidKey[]>((resolve, reject) => {
+        const matched: IDBValidKey[] = [];
         const cursorRequest = store.openCursor();
         cursorRequest.onsuccess = () => {
           const cursor = cursorRequest.result;
           if (!cursor) {
-            resolve(deleted);
+            resolve(matched);
             return;
           }
-          if (predicate(cursor.value as T)) {
-            cursor.delete();
-            deleted++;
-          }
+          if (predicate(cursor.value as T)) matched.push(cursor.primaryKey);
           cursor.continue();
         };
         cursorRequest.onerror = () => reject(cursorRequest.error ?? new Error('IndexedDB cursor failed'));
       }),
   );
+
+  for (let i = 0; i < keys.length; i += DELETE_BATCH_SIZE) {
+    await dbBulkDelete(name, keys.slice(i, i + DELETE_BATCH_SIZE));
+  }
+  return keys.length;
 }
 
 interface SettingRecord<T> {
