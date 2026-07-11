@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../auth/useAuth';
 import { scannerService, useScannerState } from './scannerService';
-import type { ScanSession } from './scanTypes';
+import type { ScanFrontierFolder, ScanSession } from './scanTypes';
+import { FolderPicker } from './FolderPicker';
 import { scanSessionRepository } from '../../services/db/scanSessionRepository';
 import { formatBytes } from '../../utils/formatBytes';
 import { formatDateTime, formatDuration } from '../../utils/formatDate';
@@ -15,10 +16,14 @@ export function ScanPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [lastSession, setLastSession] = useState<ScanSession | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [selectedFolders, setSelectedFolders] = useState<Map<string, ScanFrontierFolder>>(new Map());
   const autostarted = useRef(false);
 
   const startFresh = () => void scannerService.start(getAccessToken, { resume: false });
   const resumeScan = () => void scannerService.start(getAccessToken, { resume: true });
+  const startSelected = () =>
+    void scannerService.start(getAccessToken, { resume: false, roots: [...selectedFolders.values()] });
 
   useEffect(() => {
     let disposed = false;
@@ -84,9 +89,45 @@ export function ScanPage() {
               by size + hash. You can cancel at any time; partial results are kept and the scan can be resumed
               later.
             </p>
-            <button type="button" className="btn btn-primary" onClick={startFresh}>
-              Start Scan
-            </button>
+            <div className="scan-start-actions">
+              <button type="button" className="btn btn-primary" onClick={startFresh}>
+                Scan entire OneDrive
+              </button>
+              <button
+                type="button"
+                className="btn btn-outline"
+                onClick={() => setPickerOpen((open) => !open)}
+                aria-expanded={pickerOpen}
+              >
+                {pickerOpen ? 'Hide folder selection' : 'Choose folders…'}
+              </button>
+            </div>
+
+            {pickerOpen && (
+              <div className="folder-picker">
+                <p className="folder-picker-hint">
+                  Pick one or more folders to scan. Checking a folder includes everything inside it. Results
+                  from folders scanned earlier are kept, and duplicates are matched across all indexed files.
+                </p>
+                <FolderPicker selected={selectedFolders} onChange={setSelectedFolders} />
+                <div className="folder-picker-footer">
+                  <span className="folder-picker-count">
+                    {selectedFolders.size === 0
+                      ? 'No folders selected'
+                      : `${selectedFolders.size.toLocaleString()} folder${selectedFolders.size === 1 ? '' : 's'} selected`}
+                  </span>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={startSelected}
+                    disabled={selectedFolders.size === 0}
+                  >
+                    Scan selected folders
+                  </button>
+                </div>
+              </div>
+            )}
+
             {lastSession && (
               <p className="scan-last">
                 Last scan: {formatDateTime(lastSession.finishedAt ?? lastSession.startedAt)} ·{' '}

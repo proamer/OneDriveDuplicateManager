@@ -4,6 +4,7 @@ import { fileRepository } from '../services/db/fileRepository';
 import { scanSessionRepository } from '../services/db/scanSessionRepository';
 import {
   type FileRecord,
+  type ScanFrontierFolder,
   type ScanSession,
   type ScanWorkerRequest,
   type ScanWorkerResponse,
@@ -50,7 +51,7 @@ self.onmessage = (event: MessageEvent<ScanWorkerRequest>) => {
   const message = event.data;
   if (message.type === 'start') {
     accessToken = message.accessToken;
-    void runScan(message.sessionId, message.resume);
+    void runScan(message.sessionId, message.resume, message.roots);
   } else if (message.type === 'cancel') {
     cancelled = true;
     abortController.abort();
@@ -60,7 +61,11 @@ self.onmessage = (event: MessageEvent<ScanWorkerRequest>) => {
   }
 };
 
-async function runScan(sessionId: string, resume: boolean): Promise<void> {
+async function runScan(
+  sessionId: string,
+  resume: boolean,
+  roots: ScanFrontierFolder[] | null,
+): Promise<void> {
   const session = await scanSessionRepository.get(sessionId);
   if (!session) {
     post({ type: 'error', error: 'Scan session not found.' });
@@ -71,7 +76,9 @@ async function runScan(sessionId: string, resume: boolean): Promise<void> {
   // it is only removed once the folder is fully scanned, so a crash mid-folder
   // resumes by reprocessing that folder (writes are keyed by item id, so re-runs
   // are idempotent).
-  let queue: Array<{ itemId: string | null; path: string }> = [{ itemId: null, path: '/' }];
+  const scoped = !!roots && roots.length > 0;
+  let queue: ScanFrontierFolder[] = scoped ? [...roots] : [{ itemId: null, path: '/' }];
+  let scopePaths: string[] | null = scoped ? roots.map((root) => root.path) : null;
   let itemsSeen = 0;
   let imagesFound = 0;
   let foldersScanned = 0;
@@ -81,6 +88,7 @@ async function runScan(sessionId: string, resume: boolean): Promise<void> {
     const checkpoint = await scanSessionRepository.getCheckpoint();
     if (checkpoint && checkpoint.sessionId === sessionId && checkpoint.queue.length > 0) {
       queue = checkpoint.queue;
+      scopePaths = checkpoint.scopePaths;
       itemsSeen = checkpoint.itemsSeen;
       imagesFound = checkpoint.imagesFound;
       foldersScanned = checkpoint.foldersScanned;
@@ -92,6 +100,7 @@ async function runScan(sessionId: string, resume: boolean): Promise<void> {
     scanSessionRepository.saveCheckpoint({
       sessionId,
       queue,
+      scopePaths,
       itemsSeen,
       imagesFound,
       foldersScanned,
@@ -187,9 +196,14 @@ async function runScan(sessionId: string, resume: boolean): Promise<void> {
       return;
     }
 
-    // Full scan completed — records not touched by this session belong to files
-    // that no longer exist in OneDrive.
-    await fileRepository.purgeNotInSession(sessionId);
+    // Scan completed — records inside the scanned scope that this session did not
+    // touch belong to files that no longer exist in OneDrive. A scoped scan must
+    // only purge within its scope; results from other folders are kept.
+    if (scopePaths) {
+      await fileRepository.purgeNotInSessionUnder(sessionId, scopePaths);
+    } else {
+      await fileRepository.purgeNotInSession(sessionId);
+    }
     await scanSessionRepository.clearCheckpoint();
     const finished = await finishSession('completed', null);
     await scanSessionRepository.setLastFinished(sessionId);

@@ -2,6 +2,12 @@ export function joinPath(parent: string, name: string): string {
   return parent === '/' ? `/${name}` : `${parent}/${name}`;
 }
 
+/** True when `path` is `scope` itself or anything inside it. `scope` "/" matches everything. */
+export function isUnderPath(path: string, scope: string): boolean {
+  if (scope === '/') return true;
+  return path === scope || path.startsWith(`${scope}/`);
+}
+
 export type FolderClass = 'preferred' | 'neutral' | 'suspect';
 
 const PREFERRED_PATTERNS = [/\/pictures(\/|$)/i, /\/camera roll(\/|$)/i];

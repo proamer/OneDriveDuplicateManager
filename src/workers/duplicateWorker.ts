@@ -16,7 +16,10 @@ self.onmessage = (event: MessageEvent<DuplicateWorkerRequest>) => {
 async function run(scanSessionId: string): Promise<void> {
   try {
     post({ type: 'progress', processed: 0, total: 0, groupsFound: 0, message: 'Loading scanned files…' });
-    const files = await fileRepository.getBySession(scanSessionId);
+    // Group across every indexed file, not just this session's: scoped folder
+    // scans add to the index incrementally, and duplicates can span folders
+    // scanned at different times.
+    const files = await fileRepository.getAll();
     const previousGroups = new Map((await duplicateRepository.getAllGroups()).map((g) => [g.id, g]));
     const previousItems = new Map((await duplicateRepository.getAllItems()).map((i) => [i.id, i]));
     const ignoredKeys = new Set((await duplicateRepository.getIgnoreEntries()).map((e) => e.groupKey));
@@ -26,7 +29,7 @@ async function run(scanSessionId: string): Promise<void> {
       processed: 0,
       total: files.length,
       groupsFound: 0,
-      message: `Comparing hashes of ${files.length.toLocaleString()} images…`,
+      message: `Comparing hashes of ${files.length.toLocaleString()} files…`,
     });
     const result = buildDuplicateGroups({ files, scanSessionId, previousGroups, previousItems, ignoredKeys });
 

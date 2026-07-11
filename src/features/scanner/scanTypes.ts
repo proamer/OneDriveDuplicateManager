@@ -68,6 +68,8 @@ export interface ScanFrontierFolder {
 export interface ScanCheckpoint {
   sessionId: string;
   queue: ScanFrontierFolder[];
+  /** Folder paths this scan is limited to; null = entire drive. Needed on resume. */
+  scopePaths: string[] | null;
   itemsSeen: number;
   imagesFound: number;
   foldersScanned: number;
@@ -76,7 +78,14 @@ export interface ScanCheckpoint {
 }
 
 export type ScanWorkerRequest =
-  | { type: 'start'; sessionId: string; resume: boolean; accessToken: string }
+  | {
+      type: 'start';
+      sessionId: string;
+      resume: boolean;
+      /** Folders to scan; null/empty = entire drive from the root. */
+      roots: ScanFrontierFolder[] | null;
+      accessToken: string;
+    }
   | { type: 'cancel' }
   | { type: 'token'; requestId: number; accessToken: string | null };
 

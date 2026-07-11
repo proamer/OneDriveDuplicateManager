@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react';
 import type {
+  ScanFrontierFolder,
   ScanProgress,
   ScanSession,
   ScanWorkerRequest,
@@ -92,7 +93,7 @@ export const scannerService = {
 
   async start(
     getAccessToken: () => Promise<string | null>,
-    options: { resume?: boolean } = {},
+    options: { resume?: boolean; roots?: ScanFrontierFolder[] } = {},
   ): Promise<void> {
     if (scannerService.isBusy()) return;
 
@@ -203,7 +204,13 @@ export const scannerService = {
       void scannerService.checkResumable();
     };
 
-    worker.postMessage({ type: 'start', sessionId, resume, accessToken: token } satisfies ScanWorkerRequest);
+    worker.postMessage({
+      type: 'start',
+      sessionId,
+      resume,
+      roots: resume ? null : (options.roots ?? null),
+      accessToken: token,
+    } satisfies ScanWorkerRequest);
   },
 
   cancel(): void {
