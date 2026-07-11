@@ -58,6 +58,13 @@ export function createOneDriveService(client: GraphClient) {
       return client.json<GraphUser>('/me?$select=id,displayName,mail,userPrincipalName');
     },
 
+    /** Total bytes stored in the drive — used to estimate scan progress. */
+    async getDriveQuotaUsed(): Promise<number | null> {
+      const drive = await client.json<{ quota?: { used?: number } }>('/me/drive?$select=quota');
+      const used = drive.quota?.used;
+      return typeof used === 'number' && used > 0 ? used : null;
+    },
+
     listDriveRootChildren(signal?: AbortSignal): Promise<GraphPage<GraphDriveItem>> {
       return client.json<GraphPage<GraphDriveItem>>(`/me/drive/root/children${CHILD_PARAMS}`, { signal });
     },

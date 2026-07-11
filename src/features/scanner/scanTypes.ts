@@ -51,6 +51,12 @@ export interface ScanProgress {
   itemsSeen: number;
   imagesFound: number;
   foldersScanned: number;
+  /** Bytes of files walked so far — drives the percent estimate. */
+  bytesSeen: number;
+  /** Total bytes stored in the drive (quota.used); null when unknown or scoped scan. */
+  estimatedTotalBytes: number | null;
+  /** Discovered folders still waiting in the walk queue — fallback estimator. */
+  foldersPending: number;
   currentPath: string;
   message: string;
 }

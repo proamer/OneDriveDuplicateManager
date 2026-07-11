@@ -108,6 +108,18 @@ async function runScan(
       updatedAt: new Date().toISOString(),
     });
 
+  // Percent estimate: bytes walked vs. the drive's total used bytes. Only
+  // meaningful for a full-drive scan — a scoped scan covers a subset, so the
+  // UI falls back to a folder-frontier estimate there.
+  let estimatedTotalBytes: number | null = null;
+  if (!scopePaths) {
+    try {
+      estimatedTotalBytes = await graph.getDriveQuotaUsed();
+    } catch {
+      estimatedTotalBytes = null;
+    }
+  }
+
   const postProgress = (currentPath: string) => {
     post({
       type: 'progress',
@@ -115,6 +127,9 @@ async function runScan(
         itemsSeen,
         imagesFound,
         foldersScanned,
+        bytesSeen: totalBytes,
+        estimatedTotalBytes,
+        foldersPending: queue.length,
         currentPath,
         message: throttleMessage || `Scanning ${currentPath}`,
       },

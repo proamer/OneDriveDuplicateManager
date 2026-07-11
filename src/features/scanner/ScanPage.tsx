@@ -50,6 +50,18 @@ export function ScanPage() {
     }
   }, [scanner.phase]);
 
+  // Progress estimate. Preferred: bytes walked vs. the drive's total used bytes
+  // (full-drive scans). Fallback: completed folders vs. the known frontier —
+  // rough, since undiscovered subfolders aren't counted yet. Capped at 99%
+  // because only the walk itself knows when it is truly done.
+  const { bytesSeen, estimatedTotalBytes, foldersScanned, foldersPending } = scanner.progress;
+  let scanPercent: number | null = null;
+  if (estimatedTotalBytes !== null && estimatedTotalBytes > 0) {
+    scanPercent = Math.min(99, Math.floor((bytesSeen / estimatedTotalBytes) * 100));
+  } else if (foldersScanned + foldersPending > 0) {
+    scanPercent = Math.min(99, Math.floor((foldersScanned / (foldersScanned + foldersPending)) * 100));
+  }
+
   return (
     <>
       <div className="page-header">
@@ -144,8 +156,24 @@ export function ScanPage() {
             <div className="scan-running-header">
               <Spinner />
               <h3>{scanner.phase === 'scanning' ? 'Scanning OneDrive…' : 'Analyzing duplicates…'}</h3>
+              {scanner.phase === 'scanning' && scanPercent !== null && (
+                <span className="scan-percent">~{scanPercent}%</span>
+              )}
             </div>
-            <div className="progress-indeterminate" aria-hidden="true" />
+            {scanner.phase === 'scanning' && scanPercent !== null ? (
+              <>
+                <div className="progress-track" aria-hidden="true">
+                  <div className="progress-fill" style={{ width: `${scanPercent}%` }} />
+                </div>
+                <p className="scan-progress-note">
+                  {scanner.progress.estimatedTotalBytes !== null
+                    ? `${formatBytes(scanner.progress.bytesSeen)} of ~${formatBytes(scanner.progress.estimatedTotalBytes)} scanned — estimated from your OneDrive storage usage.`
+                    : `${scanner.progress.foldersScanned.toLocaleString()} folders done, ${scanner.progress.foldersPending.toLocaleString()} discovered folders remaining — rough estimate, more folders may be found.`}
+                </p>
+              </>
+            ) : (
+              <div className="progress-indeterminate" aria-hidden="true" />
+            )}
             <div className="scan-stats">
               <div>
                 <span className="stat-label">Items seen</span>
@@ -158,6 +186,10 @@ export function ScanPage() {
               <div>
                 <span className="stat-label">Folders scanned</span>
                 <span className="stat-value-sm">{scanner.progress.foldersScanned.toLocaleString()}</span>
+              </div>
+              <div>
+                <span className="stat-label">Data scanned</span>
+                <span className="stat-value-sm">{formatBytes(scanner.progress.bytesSeen)}</span>
               </div>
             </div>
             {scanner.progress.currentPath && (
