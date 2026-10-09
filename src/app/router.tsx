@@ -8,6 +8,7 @@ import { DuplicateReviewPage } from '../features/duplicates/DuplicateReviewPage'
 import { DeleteQueuePage } from '../features/delete/DeleteQueuePage';
 import { HistoryPage } from '../features/history/HistoryPage';
 import { SettingsPage } from '../features/settings/SettingsPage';
+import { TransferPage } from '../features/transfer/TransferPage';
 import { AppLayout } from '../components/layout/AppLayout';
 import { FullPageSpinner } from '../components/common/Spinner';
 
@@ -36,6 +37,7 @@ export function AppRouter() {
           <Route path="/queue" element={<DeleteQueuePage />} />
           <Route path="/history" element={<HistoryPage />} />
           <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/transfer" element={<TransferPage />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

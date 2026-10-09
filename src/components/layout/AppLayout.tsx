@@ -9,6 +9,7 @@ import { Spinner } from '../common/Spinner';
 const NAV_ITEMS: Array<{ to: string; label: string; icon: IconName; end?: boolean }> = [
   { to: '/', label: 'Dashboard', icon: 'dashboard', end: true },
   { to: '/scan', label: 'Scan', icon: 'scan' },
+  { to: '/transfer', label: 'Copy to Google Drive', icon: 'copies' },
   { to: '/review', label: 'Duplicate Review', icon: 'copies' },
   { to: '/queue', label: 'Delete Queue', icon: 'trash' },
   { to: '/history', label: 'History', icon: 'history' },

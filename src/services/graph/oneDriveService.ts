@@ -31,6 +31,7 @@ export interface GraphDriveItem {
   image?: { width?: number; height?: number };
   parentReference?: { driveId?: string; id?: string; path?: string };
   thumbnails?: GraphThumbnailSet[];
+  '@microsoft.graph.downloadUrl'?: string;
 }
 
 export interface GraphPage<T> {
@@ -82,6 +83,10 @@ export function createOneDriveService(client: GraphClient) {
 
     getDriveItem(itemId: string): Promise<GraphDriveItem> {
       return client.json<GraphDriveItem>(`/me/drive/items/${itemId}`);
+    },
+
+    getDownloadItem(itemId: string, signal?: AbortSignal): Promise<GraphDriveItem> {
+      return client.json<GraphDriveItem>(`/me/drive/items/${encodeURIComponent(itemId)}?$select=id,name,size,file,lastModifiedDateTime,@microsoft.graph.downloadUrl`, { signal });
     },
 
     getDriveItemThumbnails(itemId: string): Promise<GraphPage<GraphThumbnailSet>> {

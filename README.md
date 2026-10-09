@@ -106,6 +106,76 @@ src/
   utils/               formatBytes, formatDate, fileScore, pathUtils
 ```
 
+## Copy OneDrive to Google Drive
+
+Open **Copy to Google Drive** in the sidebar. Connect Google, browse and select one
+source folder in OneDrive and one destination folder in **My Drive**, then inspect
+the source and confirm the copy. Selecting the root is supported. All regular
+files and subfolders (including empty folders) are included, not just photos.
+Every **new job** creates a new named copy folder under the selected destination.
+**Resume existing job** reuses that same folder and skips completed files.
+Existing destination files are never overwritten. Shortcuts, shared drives and
+special OneDrive items are not supported in this version.
+
+Google setup:
+
+1. In [Google Cloud Console](https://console.cloud.google.com/), select/create a project and enable **Google Drive API**.
+2. Configure **Google Auth Platform** branding/audience. For an external app in Testing, add your Google account as a test user.
+3. Add `https://www.googleapis.com/auth/drive` to Data Access. The built-in browser lists existing folders throughout My Drive, so it requires the full Drive scope (a restricted scope). Public distribution requires Google's applicable OAuth verification; use Testing for personal development.
+4. Create an OAuth client of type **Web application**. Add `http://localhost`, `http://localhost:5173` (and your actual production origin) under **Authorized JavaScript origins**.
+5. Set `VITE_GOOGLE_CLIENT_ID=<client-id>.apps.googleusercontent.com` in `.env.local`, then restart/rebuild. This is a public client ID, **never a client secret**.
+
+Google access tokens remain in memory. When a session expires, the job pauses:
+click **Connect Google again**, sign in to the same Google account, and click
+**Resume existing job**. This frontend-only OAuth flow requires user interaction;
+it cannot renew credentials indefinitely unattended.
+
+Jobs, destination IDs and per-file upload checkpoints are committed to a separate
+IndexedDB database in this browser. Reopening the page restores saved jobs. The
+app allocates and saves a fixed Google file ID **before** creating anything, so a
+lost creation/completion response can be reconciled without duplicate files.
+On resume it asks Google for the actual received-byte offset, including when the
+last local checkpoint is stale. Expired upload sessions restart only the unfinished
+file using its original ID. Completed files are skipped. Resume requires the same
+Microsoft and Google accounts. Chrome/Edge Web Locks prevent concurrent writers
+in multiple tabs on the same origin.
+
+**Local storage:** only metadata/checkpoints are stored, never file content. No
+119GB download/cache is created. Transfers buffer at most one 8 MiB payload at a
+time (browser network/Blob overhead is additional), upload it, then release it.
+Range-ignoring or oversized source responses are rejected before a full file can
+be buffered. Metadata space is checked before a new job, and failed checkpoint
+commits pause the job. Do not clear this site's browser data: that deletes the
+resume records. Use the same browser profile and origin/port on return. Changing
+devices or incognito sessions does not transfer these records.
+
+Keep this page open while copying. Pause, navigation, closing the tab, token
+expiry, or an unrecoverable error pauses transfer; completed files remain in Drive.
+Transient Google/network errors use bounded retries with backoff and individual
+requests have deadlines. Screen wake lock is requested while copying, but browsers
+or the OS can refuse/release it: disable system sleep for long transfers. A closed
+or suspended browser does not continue in the background. Changes in source size
+or modification time pause the job. Files externally deleted/moved/changed after
+completion are not automatically restored. This copies content and folder structure,
+not permissions, version history, sharing links, or original timestamps.
+
+Validation: `npm run test:transfer` covers persistence, pause/reconnect/resume,
+lost responses, expired upload sessions, account guards, quota failures and bounded
+chunks, including a simulated 119GB file resumed near its end. These tests do not
+claim an actual authenticated 119GB transfer has completed.
+
+Browser QA fixture: `tests/transfer-ui.html?case=<unique-run-name>` seeds an
+isolated test account/job and intercepts all cloud requests. Run a separate Vite
+process with `VITE_GOOGLE_CLIENT_ID=ui-test` on an unused port, open this fixture,
+connect, resume until the simulated 401 pauses it, reload, reconnect, and resume.
+Expected: the saved offset survives reload and the final count is **1 / 1**.
+The fixture is outside the production entry point/build and never uses real cloud
+credentials. Use a fresh `case` value for another test.
+
+API references: [Google browser authorization](https://developers.google.com/identity/oauth2/web/guides/use-token-model),
+[Google resumable uploads](https://developers.google.com/workspace/drive/api/guides/manage-uploads),
+[OneDrive browser downloads](https://learn.microsoft.com/en-us/graph/api/driveitem-get-content?view=graph-rest-1.0).
+
 ## Known limitations
 
 - **Cache is browser-local.** IndexedDB lives in this browser profile; switching browser or device requires a rescan.

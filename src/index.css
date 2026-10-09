@@ -22,6 +22,51 @@
   --font-mono: ui-monospace, 'Cascadia Code', 'SF Mono', Consolas, monospace;
 }
 
+/* Cloud copy: paired folder explorers, followed by the transfer ledger. */
+.transfer-page { display: flex; flex-direction: column; gap: 20px; }
+.transfer-page .page-header { margin-bottom: 0; }
+.cloud-subtitle { margin-top: 6px; color: var(--text-secondary); }
+.cloud-pair { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: var(--surface); }
+.cloud-side { min-width: 0; }
+.cloud-side + .cloud-side { border-left: 1px solid var(--border); }
+.cloud-side > header { padding: 20px; border-bottom: 1px solid var(--border); min-height: 128px; display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+.cloud-side > header p { color: var(--text-secondary); overflow-wrap: anywhere; }
+.cloud-browser { padding: 16px 20px; }
+.cloud-breadcrumb { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+.cloud-folder-list { height: 260px; overflow: auto; margin-bottom: 16px; }
+.cloud-folder-list > p { color: var(--text-secondary); padding: 12px 0; }
+.cloud-folder-item { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; border: 0; border-bottom: 1px solid var(--border); background: transparent; padding: 12px 8px; color: var(--text); cursor: pointer; font: inherit; overflow-wrap: anywhere; }
+.cloud-folder-item:hover:not(:disabled) { background: var(--primary-soft); }
+.cloud-folder-item:disabled { opacity: .5; cursor: default; }
+.cloud-selection { margin-top: 12px; min-height: 40px; overflow-wrap: anywhere; color: var(--primary); }
+.cloud-setup { padding: 20px; color: var(--text-secondary); }
+.cloud-actions { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.cloud-actions > p { color: var(--text-secondary); max-width: 480px; }
+.cloud-actions > div { display: flex; gap: 8px; flex-wrap: wrap; }
+.cloud-results { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.cloud-progress { padding: 20px; display: flex; flex-direction: column; gap: 8px; }
+.cloud-progress span { color: var(--text-secondary); }
+.cloud-progress progress { width: 100%; accent-color: var(--primary); height: 8px; }
+.cloud-output { padding: 0 20px 16px; }
+.cloud-table-wrap { max-height: 420px; overflow: auto; }
+.cloud-table-wrap td:first-child { overflow-wrap: anywhere; min-width: 180px; }
+.cloud-table-wrap th { position: sticky; top: 0; background: var(--surface); }
+.cloud-results > p:last-child { padding: 16px 20px; }
+.cloud-saved-jobs { display: flex; gap: 12px; align-items: end; flex-wrap: wrap; }
+.cloud-saved-jobs label { display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 0; }
+.cloud-saved-jobs select { width: 100%; padding: 9px; border: 1px solid var(--border); border-radius: var(--radius-sm); font: inherit; background: var(--surface); color: var(--text); }
+.cloud-job-summary { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; background: var(--surface); border: 1px solid var(--border); padding: 20px; border-radius: var(--radius); overflow-wrap: anywhere; }
+.cloud-job-summary p { margin-top: 8px; color: var(--text-secondary); }
+.cloud-actions > div:first-child { max-width: 480px; display: block; color: var(--text-secondary); }
+.cloud-actions > div:first-child p + p { margin-top: 8px; }
+.transfer-page button:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
+@media (max-width: 900px) {
+  .cloud-pair { grid-template-columns: 1fr; }
+  .cloud-side + .cloud-side { border-left: 0; border-top: 1px solid var(--border); }
+  .cloud-actions { flex-direction: column; align-items: flex-start; }
+  .cloud-job-summary { grid-template-columns: 1fr; }
+}
+
 * {
   box-sizing: border-box;
 }
