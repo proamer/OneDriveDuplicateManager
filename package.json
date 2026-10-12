@@ -4,6 +4,7 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
+    "test:google-session": "node --test tests/google-session.test.mjs",
     "test:transfer": "node --test tests/transfer.test.mjs",
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
@@ -11,6 +12,7 @@
   },
   "dependencies": {
     "@azure/msal-browser": "^4.13.0",
+    "google-auth-library": "^11.2.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-router-dom": "^7.6.0"

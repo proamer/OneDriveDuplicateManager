@@ -21,7 +21,7 @@ export function loadGoogleIdentity(): Promise<void> {
     document.head.appendChild(script);
   });
 }
-export interface GoogleSession { token: string; expiresAt: number }
+export interface GoogleSession { token: string; expiresAt: number; renew?: (force: boolean) => Promise<void> }
 // Call synchronously from a click after the SDK has loaded (popup blockers).
 export function connectGoogle(): Promise<GoogleSession> {
   return new Promise((resolve, reject) => {
@@ -46,7 +46,8 @@ interface DriveFile { id: string; name: string; size?: string; mimeType: string;
 export interface UploadState { url?: string; bytes: number }
 export class GoogleDrive {
   constructor(private session: GoogleSession, private retryDelay = 1000) {}
-  private headers(extra: Record<string, string> = {}): Record<string, string> {
+  private async headers(extra: Record<string, string> = {}): Promise<Record<string, string>> {
+    if (Date.now() >= this.session.expiresAt - 60000 && this.session.renew) await this.session.renew(false);
     if (Date.now() >= this.session.expiresAt - 10000) throw new GoogleAuthExpired();
     return { Authorization: `Bearer ${this.session.token}`, ...extra };
   }
@@ -59,16 +60,25 @@ export class GoogleDrive {
     return response;
   }
   private async request(url: string, init: RequestInit = {}, retries = true): Promise<Response> {
+    let renewed = false;
     for (let attempt = 0; ; attempt++) {
       init.signal?.throwIfAborted();
       let response: Response;
-      try { response = await timedFetch(url, { ...init, headers: this.headers(init.headers as Record<string, string> | undefined) }); }
+      try { const headers = await this.headers(init.headers as Record<string, string> | undefined); init.signal?.throwIfAborted(); response = await timedFetch(url, { ...init, headers }); }
       catch (error) {
         init.signal?.throwIfAborted();
         if (error instanceof GoogleAuthExpired || !retries || attempt >= 4) throw error;
         await waitForRetry(this.retryDelay * 2 ** attempt, init.signal ?? undefined); continue;
       }
-      if (response.status === 401) throw new GoogleAuthExpired();
+      if (response.status === 401) {
+        if (!renewed && this.session.renew) {
+          renewed = true; await this.session.renew(true);
+          // A resumable PUT must query the acknowledged offset before another body is sent.
+          if (!retries) throw new Error('Google token renewed; reconcile upload offset');
+          continue;
+        }
+        throw new GoogleAuthExpired();
+      }
       const limited = response.status === 403 && /rateLimitExceeded|userRateLimitExceeded/.test(await response.clone().text());
       if (retries && attempt < 4 && (response.status >= 500 || response.status === 429 || limited)) {
         const retryAfter = Number(response.headers.get('Retry-After'));

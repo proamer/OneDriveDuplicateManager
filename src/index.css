@@ -47,6 +47,11 @@
 .cloud-progress { padding: 20px; display: flex; flex-direction: column; gap: 8px; }
 .cloud-progress span { color: var(--text-secondary); }
 .cloud-progress progress { width: 100%; accent-color: var(--primary); height: 8px; }
+.cloud-timing { padding: 0 20px 20px; display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
+.cloud-timing div { display: flex; flex-direction: column; gap: 5px; }
+.cloud-timing span, .cloud-timing p { color: var(--text-secondary); font-size: 12px; }
+.cloud-timing strong { font-size: 14px; }
+.cloud-timing p { grid-column: 1 / -1; margin: 0; }
 .cloud-output { padding: 0 20px 16px; }
 .cloud-table-wrap { max-height: 420px; overflow: auto; }
 .cloud-table-wrap td:first-child { overflow-wrap: anywhere; min-width: 180px; }

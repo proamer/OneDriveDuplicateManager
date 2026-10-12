@@ -125,10 +125,30 @@ Google setup:
 4. Create an OAuth client of type **Web application**. Add `http://localhost`, `http://localhost:5173` (and your actual production origin) under **Authorized JavaScript origins**.
 5. Set `VITE_GOOGLE_CLIENT_ID=<client-id>.apps.googleusercontent.com` in `.env.local`, then restart/rebuild. This is a public client ID, **never a client secret**.
 
-Google access tokens remain in memory. When a session expires, the job pauses:
-click **Connect Google again**, sign in to the same Google account, and click
-**Resume existing job**. This frontend-only OAuth flow requires user interaction;
-it cannot renew credentials indefinitely unattended.
+For unattended copying on this local machine, add
+`http://localhost:5173/api/google/callback` to the same client's **Authorized redirect
+URIs**, and set `GOOGLE_OAUTH_CLIENT_FILE` in `.env.local` to the downloaded Web
+OAuth client JSON's absolute path (or set server-only `GOOGLE_CLIENT_SECRET`).
+Never use a `VITE_` prefix for a secret. `client_secret*.json` is excluded from Git
+and blocked by Vite's file server. Restart `npm run dev`, connect the same Google
+account once and grant offline access, then resume the existing job.
+
+The localhost Node broker holds the refresh token in memory and refreshes access
+tokens automatically. The browser only receives short-lived access tokens; it
+deduplicates renewal across parallel workers and checks that the account remains
+the same. A 401 during upload renews credentials and queries the acknowledged
+offset before resending. **Test Google renewal** verifies an actual refresh without
+another login. This mode works with `npm run dev` at `http://localhost:5173` only;
+keep that Node process and the browser running. Config restarts in the same Node
+process retain sessions; stopping Node requires reconnecting. Refresh tokens are
+never written to browser storage or disk. It does not transfer files in the
+background after the browser is closed, nor add a backend to static hosting.
+
+Without the local broker, Google access tokens remain in browser memory and
+expiry pauses the job for manual reconnection. Revoked/expired refresh tokens
+also require reconnecting. Google external apps in Testing receive refresh
+tokens valid for seven days for Drive access; see
+[Google refresh token expiration](https://developers.google.com/identity/protocols/oauth2#expiration).
 
 Jobs, destination IDs and per-file upload checkpoints are committed to a separate
 IndexedDB database in this browser. Reopening the page restores saved jobs. The
@@ -141,8 +161,21 @@ Microsoft and Google accounts. Chrome/Edge Web Locks prevent concurrent writers
 in multiple tabs on the same origin.
 
 **Local storage:** only metadata/checkpoints are stored, never file content. No
-119GB download/cache is created. Transfers buffer at most one 8 MiB payload at a
-time (browser network/Blob overhead is additional), upload it, then release it.
+119GB download/cache is created. Transfers run up to three files concurrently,
+each buffering one 8 MiB payload (up to 24 MiB of payloads; browser network/Blob
+overhead is additional). Chunks within a file remain sequential. A failure cancels
+and drains all workers before releasing the job lock; resume reconciles each file.
+Folders are created in parent-first order before starting files. The table shows
+active files first, followed by paused/pending rows, with completed rows last.
+The progress panel shows wall-clock elapsed time, active time, downtime, average
+speed and estimated remaining time/finish date. ETA uses the slower estimate from
+remaining bytes and remaining file count, and waits for 15 seconds/3 completed
+files of measured work. Active time includes API waits/retries; downtime means
+paused, closed or awaiting reconnection. Timing is stored separately every five
+seconds and on stop; closing abruptly can leave at most one heartbeat interval
+unrecorded. Existing jobs start measuring active/downtime after this update;
+historical elapsed time cannot be split retroactively. ETA assumes uninterrupted
+transfer at the measured average speed and is not a guaranteed completion time.
 Range-ignoring or oversized source responses are rejected before a full file can
 be buffered. Metadata space is checked before a new job, and failed checkpoint
 commits pause the job. Do not clear this site's browser data: that deletes the

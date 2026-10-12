@@ -1,5 +1,6 @@
 import type { CopyEntry } from './transferService';
 import type { FolderChoice } from './CloudFolderBrowser';
+import type { TransferTiming } from './transferTiming';
 
 export interface TransferJob {
   id: string;
@@ -23,6 +24,8 @@ export interface TransferCheckpoint {
 export interface TransferStore {
   checkpoints(jobId: string): Promise<TransferCheckpoint[]>;
   saveCheckpoint(checkpoint: TransferCheckpoint): Promise<void>;
+  timing?(jobId: string): Promise<TransferTiming | undefined>;
+  saveTiming?(timing: TransferTiming): Promise<void>;
 }
 
 // Separate from scan caches: clearing the scanner's data must not discard a copy job.
@@ -30,11 +33,15 @@ const DATABASE = 'onedrive-google-copy';
 let connection: Promise<IDBDatabase> | undefined;
 function open(): Promise<IDBDatabase> {
   return connection ??= new Promise((resolve, reject) => {
-    const request = indexedDB.open(DATABASE, 1);
+    const request = indexedDB.open(DATABASE, 2);
     request.onupgradeneeded = () => {
-      request.result.createObjectStore('jobs', { keyPath: 'id' });
-      const store = request.result.createObjectStore('checkpoints', { keyPath: ['jobId', 'sourceId'] });
-      store.createIndex('job', 'jobId');
+      const db = request.result;
+      if (!db.objectStoreNames.contains('jobs')) db.createObjectStore('jobs', { keyPath: 'id' });
+      if (!db.objectStoreNames.contains('checkpoints')) {
+        const store = db.createObjectStore('checkpoints', { keyPath: ['jobId', 'sourceId'] });
+        store.createIndex('job', 'jobId');
+      }
+      if (!db.objectStoreNames.contains('timings')) db.createObjectStore('timings', { keyPath: 'jobId' });
     };
     request.onsuccess = () => {
       const db = request.result;
@@ -72,6 +79,8 @@ export const transferRepository: TransferStore & {
   saveJob: async job => { await transaction('jobs', 'readwrite', store => store.put(job)); },
   checkpoints: jobId => transaction('checkpoints', 'readonly', store => store.index('job').getAll(jobId)),
   saveCheckpoint: async checkpoint => { await transaction('checkpoints', 'readwrite', store => store.put(checkpoint)); },
+  timing: jobId => transaction('timings', 'readonly', store => store.get(jobId)),
+  saveTiming: async timing => { await transaction('timings', 'readwrite', store => store.put(timing)); },
 };
 
 export async function checkMetadataSpace(entries: CopyEntry[]): Promise<void> {

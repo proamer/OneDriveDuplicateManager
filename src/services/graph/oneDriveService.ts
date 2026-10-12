@@ -85,8 +85,15 @@ export function createOneDriveService(client: GraphClient) {
       return client.json<GraphDriveItem>(`/me/drive/items/${itemId}`);
     },
 
-    getDownloadItem(itemId: string, signal?: AbortSignal): Promise<GraphDriveItem> {
-      return client.json<GraphDriveItem>(`/me/drive/items/${encodeURIComponent(itemId)}?$select=id,name,size,file,lastModifiedDateTime,@microsoft.graph.downloadUrl`, { signal });
+    async getDownloadItem(itemId: string, signal?: AbortSignal): Promise<GraphDriveItem> {
+      const path = `/me/drive/items/${encodeURIComponent(itemId)}`;
+      const selected = await client.json<GraphDriveItem>(`${path}?$select=id,name,size,file,lastModifiedDateTime,@microsoft.graph.downloadUrl`, { signal });
+      if (selected['@microsoft.graph.downloadUrl'] || !selected.file || selected.size === 0) return selected;
+      // Some OneDrive responses omit the download annotation under $select.
+      // Fetch fresh full metadata instead; /content redirects cannot be read safely
+      // with an authenticated browser fetch. Never persist/log this signed URL.
+      signal?.throwIfAborted();
+      return client.json<GraphDriveItem>(path, { signal });
     },
 
     getDriveItemThumbnails(itemId: string): Promise<GraphPage<GraphThumbnailSet>> {
