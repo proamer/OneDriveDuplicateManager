@@ -86,7 +86,7 @@ function memoryStore() {
 }
 function server() {
   const files = new Map(); const sessions = new Map(); const calls = []; const downloadRanges = [];
-  const state = { account: 'google', loseCreate: false, loseChunk: false, expireSession: false, serverErrors: 0, generated: 0, uploadedChunks: 0 };
+  const state = { account: 'google', loseCreate: false, loseChunk: false, expireSession: false, serverErrors: 0, generated: 0, idCalls: 0, uploadedChunks: 0 };
   globalThis.fetch = async (url, init = {}) => {
     url = String(url); const parsed = new URL(url); const method = init.method ?? 'GET';
     calls.push([method, url]);
@@ -100,19 +100,19 @@ function server() {
     }
     if (state.serverErrors > 0) { state.serverErrors--; return json({ error: { message: 'temporary' } }, 503); }
     if (parsed.pathname.endsWith('/about')) return json({ user: { permissionId: state.account, emailAddress: 'amp@example.com' } });
-    if (parsed.pathname.endsWith('/generateIds')) return json({ ids: [`generated-${++state.generated}`] });
+    if (parsed.pathname.endsWith('/generateIds')) { state.idCalls++; return json({ ids: Array.from({ length: Number(parsed.searchParams.get('count')) }, () => `generated-${++state.generated}`) }); }
     if (parsed.pathname.startsWith('/upload/session/')) {
       const upload = sessions.get(url);
       if (!upload || state.expireSession) { state.expireSession = false; sessions.delete(url); return json({}, 404); }
       const range = init.headers['Content-Range'];
-      if (range.startsWith('bytes */')) return upload.bytes === upload.size ? json(upload.metadata) : new Response('', { status: 308, headers: upload.bytes ? { Range: `bytes=0-${upload.bytes - 1}` } : {} });
+      if (range.startsWith('bytes */')) return upload.bytes === upload.size ? json(files.get(upload.metadata.id)) : new Response('', { status: 308, headers: upload.bytes ? { Range: `bytes=0-${upload.bytes - 1}` } : {} });
       const match = range.match(/^bytes (\d+)-(\d+)\/(\d+)$/);
       assert.equal(Number(match[1]), upload.bytes);
       assert.equal(init.body.size, Number(match[2]) + 1 - Number(match[1]));
       upload.bytes = Number(match[2]) + 1; state.uploadedChunks++;
       if (upload.bytes === upload.size) files.set(upload.metadata.id, { ...upload.metadata, size: String(upload.size) });
       if (state.loseChunk) { state.loseChunk = false; throw new TypeError('lost response after Google accepted data'); }
-      return upload.bytes === upload.size ? json(upload.metadata) : new Response('', { status: 308, headers: { Range: `bytes=0-${upload.bytes - 1}` } });
+      return upload.bytes === upload.size ? json(files.get(upload.metadata.id)) : new Response('', { status: 308, headers: { Range: `bytes=0-${upload.bytes - 1}` } });
     }
     if (parsed.pathname.startsWith('/upload/drive/v3/files')) {
       const metadata = JSON.parse(init.body);
@@ -130,7 +130,7 @@ function server() {
       if (files.has(metadata.id)) return json({}, 409);
       files.set(metadata.id, { ...metadata, ...(metadata.mimeType !== 'application/vnd.google-apps.folder' ? { size: '0' } : {}) });
       if (state.loseCreate) { state.loseCreate = false; throw new TypeError('lost create response'); }
-      return json({ id: metadata.id });
+      return json(files.get(metadata.id));
     }
     throw new Error(`Unexpected request: ${method} ${url}`);
   };
@@ -269,8 +269,9 @@ test('pause followed by reopening resumes server offset, not stale local offset'
   await assert.rejects(run(job, store, google(), controller.signal), { name: 'AbortError' });
   const checkpoint = (await records.checkpoints(job.id)).find(value => value.sourceId === file.id);
   checkpoint.bytes = 0; await records.saveCheckpoint(checkpoint);
+  const before = remote.downloadRanges.length;
   await run(job, records);
-  assert.deepEqual(remote.downloadRanges, [[0, COPY_CHUNK_BYTES], [COPY_CHUNK_BYTES, COPY_CHUNK_BYTES + 3]]);
+  assert.deepEqual(remote.downloadRanges.slice(before), [[COPY_CHUNK_BYTES, COPY_CHUNK_BYTES + 3]]);
 });
 test('expired upload session restarts only its unfinished file using the same ID', async () => {
   const remote = server(); const job = makeJob({ ...file, size: COPY_CHUNK_BYTES + 3 }); const records = memoryStore(); const controller = new AbortController();
@@ -367,4 +368,23 @@ test('temporary Google failures retry and abort prevents writes', async () => {
   const controller = new AbortController(); controller.abort(); const before = remote.calls.length;
   await assert.rejects(run(makeJob(), memoryStore(), google(), controller.signal), { name: 'AbortError' });
   assert.equal(remote.calls.length, before);
+});
+test('fast path: batched IDs, no redundant reads, one metadata read per file, parallel folders and listing', async () => {
+  const remote = server(); const job = makeJob({ ...file, size: COPY_CHUNK_BYTES * 2 + 3 });
+  job.entries = [...Array.from({ length: 4 }, (_, i) => ({ item: { id: `dir-${i}`, name: `d${i}`, folder: {} }, parentId: 'root', path: `d${i}` })), { item: { id: 'sub', name: 'sub', folder: {} }, parentId: 'dir-0', path: 'd0/sub' }, ...job.entries];
+  const client = google(); const ensure = client.ensureFolder.bind(client); let active = 0; let maximum = 0;
+  client.ensureFolder = async (...args) => { active++; maximum = Math.max(maximum, active); await new Promise(resolve => setTimeout(resolve, 5)); try { return await ensure(...args); } finally { active--; } };
+  let metadataReads = 0; const item = job.entries.at(-1).item;
+  await resumeCopy(job, 'microsoft', { getDownloadItem: async () => { metadataReads++; return { ...item, '@microsoft.graph.downloadUrl': 'https://download.example/file' }; } }, client, memoryStore(), signal(), () => {});
+  assert.ok(maximum > 1, 'sibling folders are created in parallel');
+  assert.equal(remote.state.idCalls, 1, 'one generateIds call serves the whole job');
+  assert.equal(remote.calls.filter(([method, url]) => method === 'GET' && /\/drive\/v3\/files\/(?!generateIds)/.test(url)).length, 0, 'create/upload responses are verified without re-reading');
+  assert.equal(metadataReads, 1, 'download URL is reused across chunks');
+  assert.deepEqual(remote.downloadRanges, [[0, COPY_CHUNK_BYTES], [COPY_CHUNK_BYTES, COPY_CHUNK_BYTES * 2], [COPY_CHUNK_BYTES * 2, COPY_CHUNK_BYTES * 2 + 3]]);
+  assert.equal(remote.files.size, 7);
+  let listing = 0; let most = 0;
+  const tree = { root: ['a', 'b', 'c'], a: ['a1'], b: [], c: [], a1: [] };
+  const list = async id => { listing++; most = Math.max(most, listing); await new Promise(resolve => setTimeout(resolve, 5)); listing--; return { value: tree[id].map(child => ({ id: child, name: child, folder: {} })) }; };
+  const entries = await planCopy({ listDriveRootChildren: () => list('root'), listDriveItemChildren: list }, 'root', signal());
+  assert.deepEqual(entries.map(entry => entry.path), ['a', 'b', 'c', 'a/a1']); assert.ok(most > 1, 'folders are listed in parallel');
 });

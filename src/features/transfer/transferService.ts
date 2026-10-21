@@ -1,7 +1,7 @@
 import type { OneDriveService, GraphDriveItem } from '../../services/graph/oneDriveService';
 import type { GoogleDrive } from '../../services/google/googleDrive';
 import type { TransferJob, TransferCheckpoint, TransferStore } from './transferRepository';
-import { downloadChunk, waitForRetry } from './transferNetwork';
+import { COPY_CHUNK_BYTES, downloadChunk, waitForRetry } from './transferNetwork';
 import type { TransferTiming } from './transferTiming';
 export interface CopyEntry { item: GraphDriveItem; parentId: string; path: string }
 export const COPY_CONCURRENCY = 3;
@@ -28,25 +28,47 @@ async function downloadMetadata(graph: OneDriveService, id: string, signal: Abor
     }
   }
 }
+const LIST_CONCURRENCY = 6;
+/** Bounded worker pool. The first failure aborts `stop`; every worker drains before it is rethrown. */
+async function runPool<T>(items: T[], limit: number, stop: AbortController, task: (item: T, index: number) => Promise<void>): Promise<void> {
+  let next = 0;
+  let failure: { error: unknown } | undefined;
+  const worker = async () => {
+    try { while (next < items.length && !stop.signal.aborted) { const index = next++; await task(items[index], index); } }
+    catch (error) { failure ??= { error }; stop.abort(); }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  if (failure) throw failure.error;
+}
 export async function planCopy(graph: OneDriveService, sourceId: string, signal: AbortSignal): Promise<CopyEntry[]> {
   const entries: CopyEntry[] = [];
-  const queue = [{ id: sourceId, path: '' }];
   const visited = new Set<string>([sourceId]);
-  for (let index = 0; index < queue.length; index++) {
-    const folder = queue[index];
-    let page = folder.id === 'root' ? await graph.listDriveRootChildren(signal) : await graph.listDriveItemChildren(folder.id, signal);
-    for (;;) {
-      for (const item of page.value) {
-        const path = folder.path ? `${folder.path}/${item.name}` : item.name;
-        if (!item.folder && !item.file) throw new Error(`ไม่รองรับรายการนี้: ${path}`);
-        if (visited.has(item.id)) throw new Error(`พบรายการซ้ำในต้นทาง: ${path}`);
-        visited.add(item.id);
-        if (item.file && (!Number.isSafeInteger(item.size) || item.size! < 0)) throw new Error(`อ่านขนาดไฟล์ไม่ได้: ${path}`);
-        entries.push({ item, parentId: folder.id, path });
-        if (item.folder) queue.push({ id: item.id, path });
+  const stop = new AbortController();
+  const listing = AbortSignal.any([signal, stop.signal]);
+  // Folders of one depth are listed in parallel, then appended in queue order: same output as a sequential BFS.
+  for (let level = [{ id: sourceId, path: '' }]; level.length;) {
+    const found: CopyEntry[][] = [];
+    await runPool(level, LIST_CONCURRENCY, stop, async (folder, index) => {
+      const children: CopyEntry[] = [];
+      let page = folder.id === 'root' ? await graph.listDriveRootChildren(listing) : await graph.listDriveItemChildren(folder.id, listing);
+      for (;;) {
+        for (const item of page.value) {
+          const path = folder.path ? `${folder.path}/${item.name}` : item.name;
+          if (!item.folder && !item.file) throw new Error(`ไม่รองรับรายการนี้: ${path}`);
+          if (item.file && (!Number.isSafeInteger(item.size) || item.size! < 0)) throw new Error(`อ่านขนาดไฟล์ไม่ได้: ${path}`);
+          children.push({ item, parentId: folder.id, path });
+        }
+        if (!page['@odata.nextLink']) break;
+        page = await graph.listChildrenPage(page['@odata.nextLink'], listing);
       }
-      if (!page['@odata.nextLink']) break;
-      page = await graph.listChildrenPage(page['@odata.nextLink'], signal);
+      found[index] = children;
+    });
+    level = [];
+    for (const entry of found.flat()) {
+      if (visited.has(entry.item.id)) throw new Error(`พบรายการซ้ำในต้นทาง: ${entry.path}`);
+      visited.add(entry.item.id);
+      entries.push(entry);
+      if (entry.item.folder) level.push({ id: entry.item.id, path: entry.path });
     }
   }
   return entries;
@@ -112,15 +134,13 @@ async function resumeCopyWorkers(job: TransferJob, microsoftAccountId: string, g
       if (item.folder) {
         await google.ensureFolder(state.destinationId, item.name, parent.destinationId, `${job.id}:${item.id}`, signal);
       } else {
-        // Reuse the just-validated metadata for the first read; later chunks/retries refresh it.
-        let initial: GraphDriveItem | undefined = await downloadMetadata(graph, item.id, signal);
-        if (initial.size !== item.size || initial.lastModifiedDateTime !== item.lastModifiedDateTime) throw new Error(`ไฟล์ต้นทางเปลี่ยน: ${item.name} งานพักไว้`);
-        const read = async (start: number, end: number): Promise<Blob> => {
-          // OneDrive download URLs are short-lived; refresh metadata for every chunk/retry.
+        let source: GraphDriveItem | undefined = await downloadMetadata(graph, item.id, signal);
+        if (source.size !== item.size || source.lastModifiedDateTime !== item.lastModifiedDateTime) throw new Error(`ไฟล์ต้นทางเปลี่ยน: ${item.name} งานพักไว้`);
+        const fetchRange = async (start: number, end: number): Promise<Blob> => {
           for (let attempt = 0; ; attempt++) {
             signal.throwIfAborted();
-            const fresh = initial ?? await downloadMetadata(graph, item.id, signal);
-            initial = undefined;
+            // Signed URLs last long enough for many chunks: re-read metadata only after a failed download.
+            const fresh = source ??= await downloadMetadata(graph, item.id, signal);
             if (fresh.size !== item.size || fresh.lastModifiedDateTime !== item.lastModifiedDateTime) throw new Error(`ไฟล์ต้นทางเปลี่ยน: ${item.name} งานพักไว้`);
             const url = fresh['@microsoft.graph.downloadUrl'];
             if (!url) throw new Error(`OneDrive ไม่ส่ง URL ดาวน์โหลดสำหรับ ${item.name} แม้ขอ metadata เต็มแล้ว`);
@@ -128,9 +148,25 @@ async function resumeCopyWorkers(job: TransferJob, microsoftAccountId: string, g
             catch (error) {
               signal.throwIfAborted();
               if (attempt >= 4) throw error;
-              await waitForRetry(1000 * 2 ** attempt, signal);
+              if (source === fresh) source = undefined;
+              // First retry is immediate with a fresh URL (expired link); later ones back off.
+              if (attempt > 0) await waitForRetry(1000 * 2 ** (attempt - 1), signal);
             }
           }
+        };
+        // ponytail: one chunk of read-ahead per file overlaps OneDrive download with Google upload; memory is 2 chunks per worker.
+        let ahead: { start: number; end: number; data: Promise<Blob> } | undefined;
+        const read = async (start: number, end: number): Promise<Blob> => {
+          const prefetched = ahead?.start === start && ahead.end === end ? ahead.data : undefined;
+          ahead = undefined;
+          const chunk = await (prefetched?.catch(() => fetchRange(start, end)) ?? fetchRange(start, end));
+          if (end < item.size!) {
+            const nextEnd = Math.min(end + COPY_CHUNK_BYTES, item.size!);
+            const data = fetchRange(end, nextEnd);
+            data.catch(() => undefined);
+            ahead = { start: end, end: nextEnd, data };
+          }
+          return chunk;
         };
         // Validate even empty files and files whose upload session is already complete.
         await google.upload(state.destinationId, item.name, parent.destinationId, `${job.id}:${item.id}`, item.size!, item.file?.mimeType ?? 'application/octet-stream', read, signal,
@@ -144,24 +180,14 @@ async function resumeCopyWorkers(job: TransferJob, microsoftAccountId: string, g
     } catch (error) { update(state, 'พักไว้'); throw error; }
   };
   // Parents must exist before any child starts. File chunks stay sequential per session.
-  for (const entry of job.entries) if (entry.item.folder) await copy(entry);
-  const files = job.entries.filter(entry => entry.item.file && !states.get(entry.item.id)?.done);
-  let next = 0;
-  let failure: unknown;
-  let failed = false;
-  const worker = async () => {
-    try {
-      while (next < files.length) {
-        signal.throwIfAborted();
-        await copy(files[next++]);
-      }
-    } catch (error) {
-      if (!failed) { failed = true; failure = error; siblings.abort(); }
-      throw error;
-    }
-  };
+  // Entries are parent-first, so a folder's parent task is always registered before the folder is picked.
+  const folderTasks = new Map<string, Promise<void>>();
+  await runPool(job.entries.filter(entry => entry.item.folder), COPY_CONCURRENCY, siblings, entry => {
+    const task = (folderTasks.get(entry.parentId) ?? Promise.resolve()).then(() => copy(entry));
+    folderTasks.set(entry.item.id, task);
+    return task;
+  });
   // Drain every worker before releasing the cross-tab lock or allowing resume.
-  await Promise.allSettled(Array.from({ length: Math.min(COPY_CONCURRENCY, files.length) }, worker));
-  if (failed) throw failure;
+  await runPool(job.entries.filter(entry => entry.item.file && !states.get(entry.item.id)?.done), COPY_CONCURRENCY, siblings, copy);
   signal.throwIfAborted();
 }

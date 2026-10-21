@@ -1,6 +1,7 @@
 import { COPY_CHUNK_BYTES, timedFetch, waitForRetry } from '../../features/transfer/transferNetwork';
 const BASE = 'https://www.googleapis.com/drive/v3';
 const SCOPE = 'https://www.googleapis.com/auth/drive';
+const FILE_FIELDS = 'id,name,size,mimeType,parents,trashed,appProperties';
 export const googleConfigured = Boolean(import.meta.env.VITE_GOOGLE_CLIENT_ID);
 interface TokenResponse { access_token?: string; expires_in?: number; scope?: string; error?: string; error_description?: string }
 interface GoogleIdentity {
@@ -107,16 +108,30 @@ export class GoogleDrive {
     } while (pageToken);
     return folders;
   }
+  private ids: string[] = [];
+  private refill?: Promise<void>;
+  // One API call per 1000 files instead of per file. Unused IDs are simply never created.
   async generateId(signal: AbortSignal): Promise<string> {
-    const response = await this.check(await this.request(`${BASE}/files/generateIds?count=1&space=drive&type=files`, { signal }));
-    const id = (await response.json() as { ids: string[] }).ids[0];
-    if (!id) throw new Error('Google ไม่ส่ง ID สำหรับปลายทาง');
-    return id;
+    while (!this.ids.length) {
+      this.refill ??= (async () => {
+        const response = await this.check(await this.request(`${BASE}/files/generateIds?count=1000&space=drive&type=files`, { signal }));
+        const ids = (await response.json() as { ids?: string[] }).ids;
+        if (!ids?.length) throw new Error('Google ไม่ส่ง ID สำหรับปลายทาง');
+        this.ids.push(...ids);
+      })().finally(() => { this.refill = undefined; });
+      await this.refill;
+    }
+    return this.ids.pop()!;
   }
   private async getFile(id: string, signal: AbortSignal): Promise<DriveFile | null> {
-    const response = await this.request(`${BASE}/files/${encodeURIComponent(id)}?fields=id,name,size,mimeType,parents,trashed,appProperties`, { signal });
+    const response = await this.request(`${BASE}/files/${encodeURIComponent(id)}?fields=${FILE_FIELDS}`, { signal });
     if (response.status === 404) return null;
     return await (await this.check(response)).json() as DriveFile;
+  }
+  /** The created resource from a create/upload response, or a fresh read when the body lacks the fields. */
+  private async created(response: Response | undefined, id: string, signal: AbortSignal): Promise<DriveFile | null> {
+    const body = response && await response.json().catch(() => null) as DriveFile | null;
+    return body?.id === id && body.parents ? body : this.getFile(id, signal);
   }
   private verify(file: DriveFile, parent: string, key: string, size?: number): void {
     if (file.trashed || !file.parents?.includes(parent) || file.appProperties?.copyKey !== key ||
@@ -129,26 +144,25 @@ export class GoogleDrive {
     if (!folder || folder.trashed || folder.mimeType !== 'application/vnd.google-apps.folder') throw new Error('ไม่พบโฟลเดอร์ปลายทาง');
     return folder.id;
   }
+  // Create first: a fixed ID that already exists answers 409, which is then verified. Saves a read per item.
   async ensureFolder(id: string, name: string, parent: string, key: string, signal: AbortSignal): Promise<void> {
-    const existing = await this.getFile(id, signal);
-    if (existing) { this.verify(existing, parent, key); return; }
-    const response = await this.request(`${BASE}/files?fields=id`, {
+    const response = await this.request(`${BASE}/files?fields=${FILE_FIELDS}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, signal,
       body: JSON.stringify({ id, name, parents: [parent], mimeType: 'application/vnd.google-apps.folder', appProperties: { copyKey: key } }),
     });
     if (response.status !== 409) await this.check(response);
-    const created = await this.getFile(id, signal);
+    const created = await this.created(response.status === 409 ? undefined : response, id, signal);
     if (!created) throw new Error('ตรวจสอบโฟลเดอร์ที่สร้างไม่ได้ ลองทำต่ออีกครั้ง');
     this.verify(created, parent, key);
   }
   async upload(id: string, name: string, parent: string, key: string, size: number, mime: string, read: (start: number, end: number) => Promise<Blob>, signal: AbortSignal, state: UploadState, checkpoint: (state: UploadState) => Promise<void>): Promise<void> {
-    const existing = await this.getFile(id, signal);
-    if (existing) { this.verify(existing, parent, key, size); await checkpoint({ bytes: size }); return; }
     const metadata = { id, name, parents: [parent], mimeType: mime, appProperties: { copyKey: key } };
     if (mime.startsWith('application/vnd.google-apps.')) throw new Error('ไม่รองรับการแปลงไฟล์เป็น Google Workspace');
+    // Final response carrying the resource; undefined means "already existed / unknown, re-read it".
+    let finished: Response | undefined;
     if (size === 0) {
-      const response = await this.request(`${BASE}/files`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal, body: JSON.stringify(metadata) });
-      if (response.status !== 409) await this.check(response);
+      const response = await this.request(`${BASE}/files?fields=${FILE_FIELDS}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal, body: JSON.stringify(metadata) });
+      if (response.status !== 409) finished = await this.check(response);
     } else {
       let url = state.url;
       if (url && new URL(url).origin !== 'https://www.googleapis.com') throw new Error('Saved upload URL ไม่ถูกต้อง');
@@ -158,14 +172,10 @@ export class GoogleDrive {
       while (offset < size) {
         signal.throwIfAborted();
         if (!url) {
-          const response = await this.request('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable', {
+          const response = await this.request(`https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=${FILE_FIELDS}`, {
             method: 'POST', signal, headers: { 'Content-Type': 'application/json', 'X-Upload-Content-Type': mime, 'X-Upload-Content-Length': String(size) }, body: JSON.stringify(metadata),
           });
-          if (response.status === 409) {
-            const complete = await this.getFile(id, signal);
-            if (!complete) throw new Error('Google destination ID conflict');
-            this.verify(complete, parent, key, size); break;
-          }
+          if (response.status === 409) break;
           await this.check(response);
           url = response.headers.get('Location') ?? undefined;
           if (!url || new URL(url).origin !== 'https://www.googleapis.com') throw new Error('Google upload URL ไม่ถูกต้อง');
@@ -193,7 +203,7 @@ export class GoogleDrive {
             await waitForRetry(this.retryDelay * 2 ** (failures - 1), signal); query = true; continue;
           }
         }
-        if (response.ok) break;
+        if (response.ok) { finished = response; break; }
         if (response.status === 404 || response.status === 410) {
           const completed = await this.getFile(id, signal);
           if (completed) { this.verify(completed, parent, key, size); break; }
@@ -212,7 +222,7 @@ export class GoogleDrive {
         offset = next; query = false; await checkpoint({ url, bytes: offset });
       }
     }
-    const completed = await this.getFile(id, signal);
+    const completed = await this.created(finished, id, signal);
     if (!completed) throw new Error('ตรวจสอบไฟล์ปลายทางไม่ได้ กดทำต่อเพื่อตรวจใหม่');
     this.verify(completed, parent, key, size);
     await checkpoint({ bytes: size });
